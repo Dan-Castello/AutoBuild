@@ -1,0 +1,6 @@
+{
+  "engine":  { "logLevel": "INFO", "maxRetries": 3, "retryDelaySeconds": 5 },
+  "sap":     { "systemId": "PRD", "client": "800", "language": "ES", "timeout": 180 },
+  "excel":   { "visible": false, "screenUpdating": false },
+  "reports": { "defaultFormat": "xlsx", "retentionDays": 30 }
+}
