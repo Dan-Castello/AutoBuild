@@ -1,0 +1,11 @@
+# Runtime directories — never commit these
+logs/
+input/
+output/
+reports/
+
+# Checkpoint files
+*.clixml
+
+# PowerShell session files
+*.psd1.bak

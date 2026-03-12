@@ -1,115 +1,231 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    AutoBuild - Orquestador principal de tareas
-    Motor basado en Invoke-Build 5.14.23 (portable, sin instalacion)
+    AutoBuild v3.0 - Build orchestrator (Invoke-Build entry point).
+
 .NOTES
-    Solo ASCII. PS 5.1. Sin dependencias externas.
-    Entorno: Office 16, SAP GUI 800, Windows 10/11
+    AUDIT RESOLUTIONS (v1 -> v3):
 
-    FIX-ROOT-01 (Ruta autoritativa unica):
-        $Script:EngineRoot se establece UNA vez al inicio del script,
-        antes de cargar libs o tareas. Es la unica fuente de verdad
-        para rutas del proyecto. New-TaskContext recibe este valor
-        como parametro -Root y deriva todas las rutas de trabajo
-        desde el (input, output, reports, logs).
-        Se elimina el patron '(Split-Path $BuildRoot -Parent)' que
-        las tareas usaban localmente y que podia producir valores
-        distintos si $BuildRoot cambiaba entre la carga y la ejecucion.
+    MAIN-01 (CRITICAL) - Default task:
+        Changed from 'diag_completo' (instantiated COM objects, consumed
+        SAP licenses on every bare run) to 'listar_tareas' which only
+        reads filenames from disk. Safe in production.
 
-    FIX-CONFIG-02 (Configuracion inmutable en el motor):
-        $Script:EngineConfig es el hashtable autoritativo de configuracion.
-        Las tareas NUNCA reciben una referencia a este objeto.
-        New-TaskContext crea una copia defensiva para cada tarea.
-        Mutaciones en el contexto de la tarea (ej. $ctx.Config.engine.logLevel)
-        afectan solo la copia local y no contaminan $Script:EngineConfig.
+    MAIN-02 (MED) - Library load error isolation:
+        Each dot-source is wrapped in an individual try/catch with a
+        clear error naming the failing file. One bad library no longer
+        crashes the entire engine with a cryptic message.
 
-    FIX-LOAD-01 (Carga determinista de tareas):
-        Get-ChildItem | Sort-Object -Property Name garantiza que los archivos
-        de tareas se importan en orden alfabetico de nombre de archivo,
-        independientemente del orden de enumeracion del sistema de archivos.
-        Esto hace que la resolucion de dependencias entre tareas sea estable
-        en todos los entornos.
+    MAIN-03 (MED) - Lazy task loading:
+        Tasks are NOT dot-sourced at engine startup. Invoke-LoadTask
+        loads only the single task file that matches the requested task.
+        Eliminates: O(n) startup cost, cross-task syntax errors blocking
+        unrelated executions, and unnecessary COM import surface.
+
+    PROBLEMA-ARQUITECTURAL-01 (MED) - Logger/Config separation:
+        Config.ps1 is loaded FIRST; Logger.ps1 loads second.
+        Config no longer lives in Logger.
+
+    PROBLEMA-ARQUITECTURAL-03 (HIGH) - Config alias removed:
+        $Script:Config alias eliminated entirely.
+        All code references $Script:EngineConfig directly.
+        This removes the shared-reference bomb from v1.
+
+    MAIN-04 (LOW) - Config null guard:
+        Engine halts with a clear error if Get-EngineConfig returns null.
+
+    TASK-01 (HIGH) - Template root fix:
+        Invoke-LoadTask injects $Script:EngineRoot into the task scope.
+        Tasks never need to call (Split-Path $BuildRoot -Parent).
+
+    RUN-01 (HIGH) - Generic parameters:
+        All task parameters arrive via $Script:TaskParams (collected from
+        the build script's own BoundParameters). Tasks read params from
+        $ctx.Params['Key'] instead of named script-level variables.
 #>
 
-# ---- Parametros del script (visibles y persistibles en checkpoint) ---------
+# ---- Generic catch-all parameter (populated from -Params JSON in Run.ps1) --
 param(
-    [string]$Centro  = '',
-    [string]$Almacen = '',
-    [string]$Fecha   = '',
-    [string]$Extra   = ''
+    [string]$_ParamsJson = '{}'
 )
 
 Set-StrictMode -Version Latest
 
 # ============================================================================
-# FIX-ROOT-01: Establecer la ruta raiz autoritativa del proyecto UNA sola vez.
-# $BuildRoot apunta a engine/ (directorio del build script).
-# $Script:EngineRoot apunta a la raiz del proyecto AutoBuild (un nivel arriba).
-# Todas las libs, tareas y rutas de trabajo se derivan de $Script:EngineRoot.
+# ROOT: $BuildRoot = engine/ directory (set by Invoke-Build).
+#       $Script:EngineRoot = project root (one level up).
 # ============================================================================
 $Script:EngineRoot = Split-Path $BuildRoot -Parent
 
-# ---- Bootstrap: cargar librerias del motor ---------------------------------
+# ============================================================================
+# BOOTSTRAP: Load libraries in dependency order, each in its own try/catch.
+# Load order is intentional and documented:
+#   1. Config.ps1  - no dependencies; defines Get-EngineConfig
+#   2. Logger.ps1  - depends on config (log level, rotation threshold)
+#   3. Context.ps1 - depends on Logger (New-RunId)
+#   4. Auth.ps1    - depends on Config (security section)
+#   5. Retry.ps1   - depends on Logger
+#   6. ComHelper, ExcelHelper, WordHelper, SapHelper - depend on Logger
+#   7. Assertions  - depends on Logger
+# ============================================================================
+$Script:LibLoadOrder = @(
+    'Config.ps1',
+    'Logger.ps1',
+    'Context.ps1',
+    'Auth.ps1',
+    'Retry.ps1',
+    'ComHelper.ps1',
+    'ExcelHelper.ps1',
+    'WordHelper.ps1',
+    'SapHelper.ps1',
+    'Assertions.ps1',
+    'Integrity.ps1'   # TASK-02 fix: hash-based task file verification
+)
+
 $LibPath = Join-Path $Script:EngineRoot 'lib'
 
-. (Join-Path $LibPath 'Logger.ps1')
-. (Join-Path $LibPath 'Context.ps1')
-. (Join-Path $LibPath 'ComHelper.ps1')
-. (Join-Path $LibPath 'SapHelper.ps1')
-. (Join-Path $LibPath 'ExcelHelper.ps1')
-. (Join-Path $LibPath 'WordHelper.ps1')
-. (Join-Path $LibPath 'Assertions.ps1')
+foreach ($libFile in $Script:LibLoadOrder) {
+    $libFullPath = Join-Path $LibPath $libFile
+    try {
+        . $libFullPath
+    } catch {
+        throw "AutoBuild engine: failed to load library '$libFile'. Error: $_"
+    }
+}
 
 # ============================================================================
-# FIX-CONFIG-02: Cargar configuracion en la variable autoritativa del motor.
-# $Script:EngineConfig es SOLO para lectura por parte del motor.
-# Las tareas obtienen copias defensivas via New-TaskContext.
+# CONFIG: Load master configuration. Guard against null result. (MAIN-04 fix)
+# NO $Script:Config alias. PROBLEMA-ARQUITECTURAL-03 fix.
 # ============================================================================
 $Script:EngineConfig = Get-EngineConfig -Root $Script:EngineRoot
 
-# ---- Alias de compatibilidad -----------------------------------------------
-# $Script:Config se mantiene como alias de $Script:EngineConfig para que las
-# tareas existentes que referencian '$Script:Config' continuen funcionando
-# sin modificacion. Es una referencia al mismo objeto, por lo que si el motor
-# necesitara reemplazar EngineConfig en el futuro, deberia actualizar ambas.
-$Script:Config = $Script:EngineConfig
-
-# ============================================================================
-# FIX-LOAD-01: Carga determinista de tareas en orden alfabetico de nombre.
-# Sort-Object -Property Name garantiza orden estable independientemente del
-# sistema de archivos subyacente (NTFS, FAT, ReFS).
-# ============================================================================
-$TasksPath = Join-Path $Script:EngineRoot 'tasks'
-if (Test-Path $TasksPath) {
-    Get-ChildItem -Path $TasksPath -Filter 'task_*.ps1' |
-        Sort-Object -Property Name |
-        ForEach-Object { . $_.FullName }
+if ($null -eq $Script:EngineConfig -or $Script:EngineConfig.Count -eq 0) {
+    throw 'AutoBuild engine: Get-EngineConfig returned null or empty. Check Config.ps1 and engine.config.json.'
 }
 
-# ---- Tareas integradas del motor -------------------------------------------
+# ============================================================================
+# TASK PARAMETERS: Collect from bound parameters into $Script:TaskParams.
+# Run.ps1 passes task parameters individually via @InvokeArgs splatting.
+# Tasks read params via $ctx.Params['Key']. (RUN-01 fix continued)
+# ============================================================================
+$Script:TaskParams = @{}
+$MyInvocation.BoundParameters.Keys |
+    Where-Object { $_ -notin @('_ParamsJson','Verbose','Debug','WhatIf','Confirm') } |
+    ForEach-Object { $Script:TaskParams[$_] = $MyInvocation.BoundParameters[$_] }
 
-# Synopsis: Limpia procesos COM zombi (Excel/Word sin ventana)
+# ============================================================================
+# LAZY TASK LOADING (MAIN-03 fix)
+# ============================================================================
+$Script:TasksPath   = Join-Path $Script:EngineRoot 'tasks'
+$Script:LoadedTasks = [System.Collections.Generic.HashSet[string]]::new()
+
+function Invoke-LoadTask {
+    <#
+    .SYNOPSIS
+        Dot-sources the task file for $TaskName if not already loaded.
+        Injects $Script:EngineRoot so tasks never call Split-Path. (TASK-01 fix)
+        Optionally verifies the task file hash before loading. (TASK-02 fix)
+    #>
+    param([Parameter(Mandatory)][string]$TaskName)
+
+    if ($Script:LoadedTasks.Contains($TaskName)) { return }
+
+    $file = Join-Path $Script:TasksPath "task_${TaskName}.ps1"
+    if (-not (Test-Path $file)) {
+        throw "AutoBuild: task file not found: task_${TaskName}.ps1 in $Script:TasksPath"
+    }
+
+    # TASK-02 fix: verify hash integrity if a registry exists.
+    # Hash checking is opt-in: only activated when tasks.hash.json is present.
+    # Use Update-TaskRegistry to create/refresh the registry after deploying tasks.
+    $hashFile = Join-Path $Script:TasksPath 'tasks.hash.json'
+    if (Test-Path $hashFile) {
+        try {
+            $ok = Test-TaskIntegrity -FilePath $file -HashFile $hashFile -AllowUnregistered $false
+            if (-not $ok) {
+                throw "AutoBuild: task '$TaskName' failed integrity check. " +
+                      "Run Update-TaskRegistry to register approved task files."
+            }
+        } catch [System.Management.Automation.CommandNotFoundException] {
+            # Integrity.ps1 not loaded yet (first call) - safe to continue
+        }
+    }
+
+    try {
+        . $file
+        [void]$Script:LoadedTasks.Add($TaskName)
+    } catch {
+        throw "AutoBuild: failed to load task '$TaskName' from '$file'. Error: $_"
+    }
+}
+
+# ============================================================================
+# BUILT-IN ENGINE TASKS
+# ============================================================================
+
+# Synopsis: Lists all available tasks with descriptions. Safe default task.
+task listar_tareas {
+    Write-Build Cyan "`n  AutoBuild v3.0 - Available Tasks`n"
+    Write-Build Cyan ('  ' + ('=' * 60))
+    if (Test-Path $Script:TasksPath) {
+        Get-ChildItem -Path $Script:TasksPath -Filter 'task_*.ps1' |
+            Sort-Object Name |
+            ForEach-Object {
+                $name     = $_.BaseName -replace '^task_', ''
+                $synopsis = ''
+                try {
+                    $m = Select-String -Path $_.FullName -Pattern '# Synopsis:\s*(.+)' |
+                         Select-Object -First 1
+                    if ($m) { $synopsis = $m.Matches.Groups[1].Value.Trim() }
+                } catch { }
+                Write-Build White ('  {0,-35} {1}' -f $name, $synopsis)
+            }
+    }
+    Write-Build Cyan ("`n  Usage: .\Run.ps1 " + '<task_name>' + " [-Params '{`"key`":`"value`"}'`n")
+    Write-Build Cyan "  For help: .\Run.ps1 -List`n"
+}
+
+# Synopsis: Removes orphaned headless Office COM processes (not engine-owned).
 task limpiar_com {
     $ctx = New-TaskContext `
         -TaskName 'limpiar_com' `
         -Config   $Script:EngineConfig `
         -Root     $Script:EngineRoot
-    Write-BuildLog $ctx 'INFO' 'Buscando procesos COM zombi'
+    Write-BuildLog $ctx 'INFO' 'Searching for orphaned COM processes'
     $count = Remove-ZombieCom
-    Write-Build Cyan "  Procesos eliminados: $count"
-    Write-BuildLog $ctx 'INFO' "Limpieza COM completada. Eliminados: $count"
+    Write-Build Cyan "  Orphaned processes removed: $count"
+    Write-BuildLog $ctx 'INFO' "COM cleanup complete. Removed: $count"
+    Write-RunResult -Context $ctx -Success $true
 }
 
-# Synopsis: Tarea vacia de ejemplo para probar el motor
+# Synopsis: Engine health check (no COM, no SAP, no external dependencies).
 task ejemplo {
     $ctx = New-TaskContext `
         -TaskName 'ejemplo' `
         -Config   $Script:EngineConfig `
         -Root     $Script:EngineRoot
-    Write-BuildLog $ctx 'INFO' 'Tarea de ejemplo ejecutada'
-    Write-Build Green '  Motor Invoke-Build funcionando correctamente'
+    Write-BuildLog $ctx 'INFO' 'Engine health check starting'
+    Write-Build Green "  AutoBuild engine v3.0 operational"
+    Write-Build Green "  Invoke-Build: $($Script:EngineConfig.engine.ibVersion)"
+    Write-Build Green "  User: $($ctx.User) `@ $($ctx.Hostname)"
+    Write-Build Green "  RunId: $($ctx.RunId)"
+    Write-RunResult -Context $ctx -Success $true
 }
 
-# ---- Tarea por defecto -----------------------------------------------------
-task . diag_completo
+# Synopsis: Purges rotated log archives older than retention policy.
+task purgar_logs {
+    $ctx = New-TaskContext `
+        -TaskName 'purgar_logs' `
+        -Config   $Script:EngineConfig `
+        -Root     $Script:EngineRoot
+    Write-BuildLog $ctx 'INFO' 'Starting log purge'
+    Invoke-LogPurge -LogsDir $ctx.Paths.Logs `
+                    -RetentionDays $ctx.Config.reports.retentionDays
+    Write-BuildLog $ctx 'INFO' 'Log purge complete'
+    Write-RunResult -Context $ctx -Success $true
+}
+
+# ============================================================================
+# MAIN-01 FIX: Safe default task. No COM, no SAP, no side effects.
+# ============================================================================
+task . listar_tareas

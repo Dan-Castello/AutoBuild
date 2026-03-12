@@ -1,74 +1,86 @@
 #Requires -Version 5.1
+# =============================================================================
 # lib/Context.ps1
-# Fabrica de contextos de ejecucion para tareas.
-# El contexto es el objeto que se pasa entre funciones de libreria.
+# AutoBuild v3.0 - Task execution context factory.
 #
-# FIX-CONFIG-01 (Inmutabilidad de configuracion):
-#   New-TaskContext recibe $Script:EngineConfig (hashtable autoritativo)
-#   y crea una COPIA de las secciones que necesita. Las mutaciones del
-#   contexto (ej. $ctx.Config.engine.logLevel = 'DEBUG' en diag_log)
-#   afectan solo la copia local de la tarea y no contaminan
-#   $Script:EngineConfig ni los contextos de otras tareas.
+# AUDIT RESOLUTIONS:
+#   FIX-CONFIG-01 (IMMUTABILITY): New-TaskContext creates a deep clone of
+#     all config sections. Task mutations never contaminate $Script:EngineConfig.
+#   FIX-PATH-01 (SINGLE ROOT): All Paths.* entries derive exclusively from
+#     the $Root parameter. No reliance on config-embedded path strings.
+#   F3-08 (ROBUSTNESS): Context now captures User (from WindowsIdentity),
+#     Hostname, and SessionId for structured log enrichment.
+#   PROBLEMA-ARQUITECTURAL-03: $Script:Config alias eliminated.
+#     Tasks reference $Script:EngineConfig or their context copy only.
 #
-# FIX-PATH-01 (Ruta autoritativa unica):
-#   $ctx.Paths.* se calcula EXCLUSIVAMENTE a partir del parametro $Root,
-#   que en engine/Main.build.ps1 siempre es $Script:EngineRoot.
-#   Se elimina la dependencia de $Config.paths.* que existia antes
-#   y que podia divergir si el build se lanzaba desde un directorio
-#   distinto al de la configuracion.
-#
-# CONTRATO DE COMPATIBILIDAD:
-#   - La firma publica de New-TaskContext no cambia.
-#   - Las claves de $ctx.Paths (Root, Input, Output, Reports, Logs)
-#     mantienen los mismos nombres que antes.
-#   - $ctx.Config sigue siendo accesible (es la copia, no el original).
-
+# CONTEXT SCHEMA:
+#   RunId     - unique run identifier (collision-free GUID fragment)
+#   TaskName  - name of the executing task
+#   Config    - deep clone of relevant engine config sections (mutable by task)
+#   StartTime - datetime of context creation
+#   Params    - task-specific parameters from Run.ps1 -Params JSON
+#   User      - Windows username (domain\user -> user only)
+#   Hostname  - machine name for cross-host log correlation
+#   SessionId - process ID for within-session correlation
+#   Paths     - hashtable: Root, Input, Output, Reports, Logs
+# =============================================================================
 Set-StrictMode -Version Latest
 
 function New-TaskContext {
     <#
     .SYNOPSIS
-        Crea el contexto de ejecucion de una tarea.
+        Creates the execution context for a task.
     .PARAMETER TaskName
-        Nombre de la tarea (para logs y trazas).
+        Name of the task (appears in every log entry).
     .PARAMETER Config
-        Configuracion del motor ($Script:EngineConfig).
-        New-TaskContext crea una copia defensiva — mutaciones no afectan
-        al original.
+        Engine master config ($Script:EngineConfig). A deep clone is made;
+        the original is never mutated.
     .PARAMETER Root
-        Directorio raiz del proyecto AutoBuild ($Script:EngineRoot).
-        Todas las rutas de trabajo se derivan de este parametro.
+        AutoBuild project root ($Script:EngineRoot). All paths derive from this.
     .PARAMETER Params
-        Parametros especificos de la tarea (opcional).
+        Hashtable of task-specific parameters (from $Script:TaskParams).
+    .OUTPUTS
+        Hashtable representing the task execution context.
     #>
     param(
-        [string]$TaskName,
-        [hashtable]$Config,
-        [string]$Root,
+        [Parameter(Mandatory)][string]$TaskName,
+        [Parameter(Mandatory)][hashtable]$Config,
+        [Parameter(Mandatory)][string]$Root,
         [hashtable]$Params = @{}
     )
 
-    # FIX-CONFIG-01: copia defensiva de las secciones usadas por la tarea.
-    # Cada seccion se clona con .Clone() para obtener una nueva tabla hash
-    # independiente. Las secciones anidadas (engine, excel, sap) contienen
-    # solo valores escalares (string, bool, int), por lo que Clone() de nivel
-    # 1 es suficiente — no hay hashtables anidadas adicionales en estos valores.
-    $configSnapshot = @{
-        engine  = $Config.engine.Clone()
-        sap     = $Config.sap.Clone()
-        excel   = $Config.excel.Clone()
-        reports = $Config.reports.Clone()
+    # Deep clone of all config sections. Each section contains only scalar
+    # values, so a single-level Clone() is sufficient. New config sections
+    # added in Config.ps1 are automatically cloned by iterating all keys.
+    $configSnapshot = @{}
+    foreach ($key in $Config.Keys) {
+        if ($Config[$key] -is [hashtable]) {
+            $configSnapshot[$key] = $Config[$key].Clone()
+        } else {
+            $configSnapshot[$key] = $Config[$key]
+        }
     }
 
-    # FIX-PATH-01: todas las rutas derivan de $Root.
-    # Se elimina la lectura desde $Config.paths.* que era la fuente de
-    # divergencia cuando Config y BuildRoot apuntaban a directorios distintos.
+    # Capture identity for log enrichment. (F3-08 fix)
+    $user     = ''
+    $hostname = $env:COMPUTERNAME
+    try {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        # Strip domain prefix: DOMAIN\user -> user
+        $user = ($identity.Name -split '\\')[-1]
+    } catch {
+        $user = $env:USERNAME
+    }
+
     $ctx = @{
         RunId     = New-RunId
         TaskName  = $TaskName
         Config    = $configSnapshot
         StartTime = [datetime]::Now
         Params    = $Params
+        User      = $user
+        Hostname  = $hostname
+        SessionId = $PID
         Paths     = @{
             Root    = $Root
             Input   = Join-Path $Root 'input'

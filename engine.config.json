@@ -1,6 +1,36 @@
 {
-  "engine":  { "logLevel": "INFO", "maxRetries": 3, "retryDelaySeconds": 5 },
-  "sap":     { "systemId": "PRD", "client": "800", "language": "ES", "timeout": 180 },
-  "excel":   { "visible": false, "screenUpdating": false },
-  "reports": { "defaultFormat": "xlsx", "retentionDays": 30 }
+  "engine": {
+    "logLevel": "INFO",
+    "maxRetries": 3,
+    "retryDelaySeconds": 5,
+    "maxConcurrentJobs": 4
+  },
+  "sap": {
+    "systemId": "PRD",
+    "client": "800",
+    "language": "ES",
+    "timeout": 180
+  },
+  "excel": {
+    "visible": false,
+    "screenUpdating": false
+  },
+  "reports": {
+    "defaultFormat": "xlsx",
+    "retentionDays": 30,
+    "maxLogSizeBytes": 10485760
+  },
+  "notifications": {
+    "enabled": false,
+    "smtpServer": "",
+    "smtpPort": 587,
+    "fromAddr": "",
+    "toAddr": ""
+  },
+  "security": {
+    "adminAdGroup": "",
+    "developerAdGroup": "",
+    "adminUsers": "",
+    "developerUsers": ""
+  }
 }
