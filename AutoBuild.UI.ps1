@@ -2005,11 +2005,12 @@ $Script:Fn_GetDiagnostics = {
         $results += [PSCustomObject]@{Category=$cat;Item=$item;Value=$val;Status=$status;Message=$msg}
     }
     $psv = $PSVersionTable.PSVersion.ToString()
-    & $add 'Runtime' 'PowerShell' $psv (if ([version]$psv -ge [version]'5.1'){'OK'}else{'WARN'}) ''
+    # FIX: In PS 5.1 argument mode, (if ...) is not valid — use $(if ...) subexpression.
+    & $add 'Runtime' 'PowerShell' $psv $(if ([version]$psv -ge [version]'5.1'){'OK'}else{'WARN'}) ''
     foreach ($f in @('Run.ps1','engine\Main.build.ps1','engine.config.json')) {
         $fp = Join-Path $Script:EngineRoot $f
         $ok = Test-Path $fp
-        & $add 'Engine' $f $fp (if ($ok){'OK'}else{'ERROR'}) (if (-not $ok){'Missing'}else{''})
+        & $add 'Engine' $f $fp $(if ($ok){'OK'}else{'ERROR'}) $(if (-not $ok){'Missing'}else{''})
     }
     foreach ($d in @('logs','output','reports','input')) {
         $dp = Join-Path $Script:EngineRoot $d
@@ -2456,18 +2457,27 @@ $Script:Fn_LoadConfigPage = {
     }
     $cfg = & $Script:Fn_GetConfig
     if ($null -ne $ce) {
-        $ce.Text = if ($null -ne $cfg) { $cfg | ConvertTo-Json -Depth 5 } else { '// Error reading config.' }
+        if ($null -ne $cfg) {
+            $ce.Text = $cfg | ConvertTo-Json -Depth 5
+        } else {
+            $ce.Text = '// Error reading config.'
+        }
     }
     $cs = $Script:Ctrl['txtConfigStatus']; if ($null -ne $cs) { $cs.Text = '' }
 }
 
 $Script:Fn_SaveConfigPage = {
     $ce = $Script:Ctrl['txtConfigEditor']
-    $r  = & $Script:Fn_SaveConfigData -JsonContent (if ($null -ne $ce) { $ce.Text } else { '' })
+    $r  = & $Script:Fn_SaveConfigData -JsonContent $(if ($null -ne $ce) { $ce.Text } else { '' })
     $cs = $Script:Ctrl['txtConfigStatus']
     if ($null -ne $cs) {
-        $cs.Text       = if ($r.Success) { 'Saved.' } else { "Error: $($r.Error)" }
-        $cs.Foreground = if ($r.Success) { [System.Windows.Media.Brushes]::LimeGreen } else { [System.Windows.Media.Brushes]::Crimson }
+        if ($r.Success) {
+            $cs.Text       = 'Saved.'
+            $cs.Foreground = [System.Windows.Media.Brushes]::LimeGreen
+        } else {
+            $cs.Text       = "Error: $($r.Error)"
+            $cs.Foreground = [System.Windows.Media.Brushes]::Crimson
+        }
     }
 }
 
@@ -2492,7 +2502,14 @@ $Script:Fn_UpdateNewTaskPreview = {
     $ne = $Script:Ctrl['txtNewTaskNameError']
     if ($null -ne $ne) {
         $valid = [string]::IsNullOrWhiteSpace($name) -or ($name -match '^[a-zA-Z0-9_-]+$')
-        $ne.Visibility = if ($valid) { [System.Windows.Visibility]::Collapsed } else { [System.Windows.Visibility]::Visible }
+        # FIX: In PS 5.1, "$obj.Property = if (...) {...}" is NOT valid inside a WPF
+        # dispatcher callback — 'if' is parsed as a command name and throws
+        # CommandNotFoundException.  Use an explicit if/else block instead.
+        if ($valid) {
+            $ne.Visibility = [System.Windows.Visibility]::Collapsed
+        } else {
+            $ne.Visibility = [System.Windows.Visibility]::Visible
+        }
     }
 }
 
