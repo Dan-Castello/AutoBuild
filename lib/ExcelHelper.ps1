@@ -6,7 +6,7 @@
 # FUNDAMENTAL RULE:
 #   Every COM property/method that returns a COM object MUST be captured
 #   in a local variable and released with Invoke-ReleaseComObject.
-#   Never chain: $wb.Worksheets.Item(1).Cells(1,1).Value2 — each dot
+#   Never chain: $wb.Worksheets.Item(1).Cells(1,1).Value2 - each dot
 #   creates an unreleased COM wrapper that prevents EXCEL.EXE from exiting.
 #
 # AUDIT RESOLUTIONS:
@@ -24,7 +24,7 @@
 # =============================================================================
 Set-StrictMode -Version Latest
 
-# Excel SaveFormat constants — symbolic names instead of magic integers.
+# Excel SaveFormat constants - symbolic names instead of magic integers.
 $Script:ExcelFormats = @{
     xlsx  = 51   # xlOpenXMLWorkbook
     xlsm  = 52   # xlOpenXMLWorkbookMacroEnabled
@@ -174,12 +174,19 @@ function Add-ExcelSheet {
         Adds a new worksheet to the workbook. Releases the Worksheets collection.
         Caller must release the returned sheet with Invoke-ReleaseComObject.
     #>
-    param([Parameter(Mandatory)]$Workbook)
+    param(
+        [Parameter(Mandatory)]$Workbook,
+        [string]$Name = ''
+    )
 
     $sheets = $null
     try {
         $sheets = $Workbook.Worksheets
-        return $sheets.Add()
+        $ws = $sheets.Add()
+        if (-not [string]::IsNullOrWhiteSpace($Name)) {
+            try { $ws.Name = $Name } catch {}
+        }
+        return $ws
     } finally {
         if ($null -ne $sheets) { Invoke-ReleaseComObject $sheets }
     }
@@ -258,91 +265,107 @@ function Get-ExcelUsedRange {
 function Write-ExcelRange {
     <#
     .SYNOPSIS
-        Writes an array of hashtables to a sheet using a SINGLE COM call.
-        Eliminates the cell-by-cell anti-pattern from Write-ExcelData.
+        Writes rows of data to a worksheet using row-by-row Cells assignment.
 
     .DESCRIPTION
-        BUG-EXCEL-02 (CRITICAL) fix. The v1 implementation wrote each cell
-        individually: 10K rows x 10 cols = 100K COM round-trips (~10 min).
-        This function builds a 2D array in .NET memory and assigns it to
-        Range.Value2 in one call. Typical time: <1 second for 10K rows.
+        PS 5.1 / Office 16 SAFE implementation.
 
-        Performance comparison (10K rows, 10 cols, typical workstation):
-          v1 Write-ExcelData  : ~8-12 minutes
-          v3 Write-ExcelRange : ~0.5-2 seconds
-          Improvement         : ~1000x
+        IMPORTANT: The [object[,]] + Range.Value2 pattern FAILS in Office 16
+        under PS 5.1 Set-StrictMode because the COM marshaller internally calls
+        op_Addition when converting .NET multidimensional arrays to SAFEARRAY(VARIANT).
+        This is an Office 16 COM interop bug with PS 5.1 strict mode.
 
-    .PARAMETER Sheet
-        Target worksheet COM object.
-    .PARAMETER Data
-        Array of hashtables. Keys become column headers.
-    .PARAMETER Columns
-        Explicit column order. If omitted, sorted keys of Data[0] are used.
-    .PARAMETER StartRow
-        Row index for the header row (1-based). Default: 1.
-    .PARAMETER WriteHeaders
-        If $true (default), writes column names in the header row.
+        This implementation writes one row at a time using Cells(r,c).Value2,
+        which avoids all array marshalling. Performance is adequate for audit
+        workloads (< 1000 rows). For larger datasets use Export-Csv instead.
+
+    .PARAMETER Context      Task execution context.
+    .PARAMETER Sheet        Target COM worksheet.
+    .PARAMETER Data         Collection of rows: hashtable[] or any IDictionary[].
+    .PARAMETER Columns      Column order. Auto-detected from first row if omitted.
+    .PARAMETER StartRow     1-based first row. Default: 1.
+    .PARAMETER WriteHeaders Write column names in header row. Default: $true.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Context,
         [Parameter(Mandatory)]$Sheet,
-        [Parameter(Mandatory)][array]$Data,
-        [string[]]$Columns     = @(),
-        [int]$StartRow         = 1,
-        [bool]$WriteHeaders    = $true
+        [Parameter(Mandatory)]$Data,
+        $Columns            = $null,
+        [int]$StartRow      = 1,
+        [bool]$WriteHeaders = $true
     )
 
-    if ($Data.Count -eq 0) {
-        Write-BuildLog $Context 'WARN' 'Write-ExcelRange: empty data array'
+    # Collect rows into a List<IDictionary> - works for both [hashtable] and
+    # [ordered]@{} (OrderedDictionary) without any array cast.
+    $rows = [System.Collections.Generic.List[System.Collections.IDictionary]]::new()
+    if ($null -ne $Data) {
+        foreach ($item in $Data) {
+            if ($item -is [System.Collections.IDictionary]) {
+                $rows.Add($item)
+            }
+        }
+    }
+
+    if ($rows.Count -eq 0) {
+        Write-BuildLog $Context 'WARN' 'Write-ExcelRange: no rows to write'
         return
     }
 
-    if ($Columns.Count -eq 0) {
-        $Columns = @($Data[0].Keys | Sort-Object)
+    # Build column name list. @($dict.Keys) materialises the key collection
+    # to object[] before Sort-Object to prevent PS 5.1 PSCustomObject wrapping.
+    $needAutoCol = $true
+    if ($null -ne $Columns -and $Columns -is [System.Array] -and $Columns.Length -gt 0) {
+        $needAutoCol = $false
     }
+    $colNames = [System.Collections.Generic.List[string]]::new()
+    if ($needAutoCol) {
+        $keys = @($rows[0].Keys) | Sort-Object
+        foreach ($k in $keys) { $colNames.Add([string]$k) }
+    } else {
+        foreach ($c in $Columns) { $colNames.Add([string]$c) }
+    }
+    $colCount = $colNames.Count
 
-    $colCount = $Columns.Count
-    $dataRows = $Data.Count
-    $totalRows = if ($WriteHeaders) { $dataRows + 1 } else { $dataRows }
-
-    # Build 2D array in .NET memory.
-    # Excel expects [1..rows, 1..cols] 1-based arrays; use [object[,]] with offset.
-    $arr = New-Object 'object[,]' $totalRows, $colCount
-
-    $offset = 0
+    # Write header row.
+    $currentRow = $StartRow
     if ($WriteHeaders) {
         for ($c = 0; $c -lt $colCount; $c++) {
-            $arr[0, $c] = $Columns[$c]
+            $cell = $null
+            try {
+                $cell = $Sheet.Cells($currentRow, $c + 1)
+                $cell.Value2 = $colNames[$c]
+            } finally {
+                if ($null -ne $cell) { Invoke-ReleaseComObject $cell }
+            }
         }
-        $offset = 1
+        $currentRow++
     }
 
+    # Write data rows - one cell at a time, releasing each COM cell object.
+    $dataRows = $rows.Count
     for ($r = 0; $r -lt $dataRows; $r++) {
+        $row = $rows[$r]
         for ($c = 0; $c -lt $colCount; $c++) {
-            $val = $Data[$r][$Columns[$c]]
-            $arr[$r + $offset, $c] = if ($null -eq $val) { '' } else { "$val" }
+            $key = $colNames[$c]
+            $val = ''
+            if ($row.Contains($key) -and $null -ne $row[$key]) {
+                $val = [string]$row[$key]
+            }
+            $cell = $null
+            try {
+                $cell = $Sheet.Cells($currentRow, $c + 1)
+                $cell.Value2 = $val
+            } finally {
+                if ($null -ne $cell) { Invoke-ReleaseComObject $cell }
+            }
         }
+        $currentRow++
     }
 
-    # ONE COM call to write all data.
-    $range = $null
-    $topLeft = $null
-    $botRight = $null
-    try {
-        $topLeft  = $Sheet.Cells($StartRow, 1)
-        $botRight = $Sheet.Cells($StartRow + $totalRows - 1, $colCount)
-        $range    = $Sheet.Range($topLeft, $botRight)
-        $range.Value2 = $arr
-        Write-BuildLog $Context 'DEBUG' "Write-ExcelRange: $dataRows rows x $colCount cols written in one COM call"
-    } catch {
-        Write-BuildLog $Context 'ERROR' "Write-ExcelRange failed: $_"
-        throw
-    } finally {
-        if ($null -ne $range)    { Invoke-ReleaseComObject $range    }
-        if ($null -ne $botRight) { Invoke-ReleaseComObject $botRight }
-        if ($null -ne $topLeft)  { Invoke-ReleaseComObject $topLeft  }
-    }
+    Write-BuildLog $Context 'DEBUG' (
+        'Write-ExcelRange: {0} rows x {1} cols written (row-by-row)' -f $dataRows, $colCount)
 }
+
 
 function Read-ExcelRange {
     <#

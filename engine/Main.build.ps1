@@ -208,6 +208,63 @@ function Invoke-LoadTask {
 }
 
 # ============================================================================
+# TASK REGISTRATION — FIX MAIN-03-COMPAT (CRITICAL)
+#
+# Invoke-Build operates in two strictly separate phases:
+#   Phase 1 (Planning): IB executes the build file and records every
+#                       'task name { }' declaration. The task graph is
+#                       built and validated entirely during this phase.
+#   Phase 2 (Execution): IB runs the body of the planned tasks.
+#
+# The MAIN-03 lazy-loading design assumed IB would call Invoke-LoadTask
+# on demand before planning. This is not how IB works. Invoke-LoadTask is
+# a PowerShell function, not a task; IB never invokes it during planning.
+# Result: every task in tasks/ is invisible to IB => "Missing task" error.
+#
+# FIX: dot-source all task files during Phase 1 so their 'task name { }'
+# declarations are registered in the IB plan. Integrity verification via
+# Invoke-LoadTask still runs inside each task body during Phase 2 when
+# tasks.hash.json is present — the body of each external task must call
+# Invoke-LoadTask itself (which all generated tasks already do via New-TaskContext).
+#
+# Error isolation: a syntax error in one task file emits a warning but
+# does not abort the engine. Other tasks remain available. (MAIN-02 pattern)
+# ============================================================================
+if (Test-Path $Script:TasksPath) {
+    # FIX-MAIN-237 (CRITICAL): Under Set-StrictMode -Version Latest, $_ inside
+    # a catch block is rebound to the ErrorRecord. The previous code used
+    # $($_.Name) inside the catch string, which called .Name on the ErrorRecord
+    # (not the FileInfo), throwing PropertyNotFoundException and aborting the
+    # entire engine bootstrap with "0 tasks, 1 errors" before any task registered.
+    #
+    # Fix 1: Capture $taskFileName from the FileInfo BEFORE entering try/catch
+    #   so the catch block never needs to dereference $_ for the file name.
+    # Fix 2: Use @() + foreach instead of pipeline ForEach-Object to guarantee
+    #   array semantics in PS 5.1 even when a single file matches
+    #   (pipeline can unwrap a single FileInfo to a bare string under StrictMode).
+    # Fix 3: -Property Name (explicit) on Sort-Object — positional arg "Name"
+    #   is identical in effect but explicit is safer for strict-mode parsers.
+    $taskFiles = @(
+        Get-ChildItem -Path $Script:TasksPath -Filter 'task_*.ps1' |
+            Where-Object  { $_.Name -ne 'task_TEMPLATE.ps1' } |
+            Sort-Object   -Property Name
+    )
+
+    foreach ($taskFileInfo in $taskFiles) {
+        $taskFileName = $taskFileInfo.Name      # captured before try — safe in catch
+        $taskFilePath = $taskFileInfo.FullName
+        try {
+            . $taskFilePath
+        } catch {
+            # $_ here is the ErrorRecord. $taskFileName holds the FileInfo.Name
+            # captured above — no .Name dereference on $_ required.
+            Write-Warning ("AutoBuild engine: error registering task file " +
+                           "'$taskFileName'. Task will be unavailable. Error: $_")
+        }
+    }
+}
+
+# ============================================================================
 # BUILT-IN ENGINE TASKS
 # ============================================================================
 

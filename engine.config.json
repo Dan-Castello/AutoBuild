@@ -28,9 +28,11 @@
     "toAddr": ""
   },
   "security": {
-    "adminAdGroup": "",
-    "developerAdGroup": "",
-    "adminUsers": "",
-    "developerUsers": ""
+    "_comment": "Set adminAdGroup/developerAdGroup to LDAP DNs for AD integration. Use adminUsers/developerUsers as comma-separated fallback when AD is unavailable.",
+    "adminAdGroup":      "",
+    "developerAdGroup":  "",
+    "adminUsers":        "autobuild_admin",
+    "developerUsers":    "autobuild_dev",
+    "roleCacheTTLMinutes": 480
   }
 }

@@ -120,8 +120,9 @@ function Write-BuildLog {
     $regFile = Join-Path $Context.Paths.Logs 'registry.jsonl'
 
     # Rotate if needed before appending. (LOG-02 fix)
-    Invoke-LogRotationIfNeeded -FilePath $regFile `
-        -MaxBytes $Context.Config.reports.maxLogSizeBytes
+    $maxLogBytes = try { [long]$Context.Config.reports.maxLogSizeBytes } catch { 0 }
+    if ($maxLogBytes -le 0) { $maxLogBytes = 10485760 }   # 10 MB default
+    Invoke-LogRotationIfNeeded -FilePath $regFile -MaxBytes $maxLogBytes
 
     Write-LogLine -FilePath $regFile -Line $json
 }

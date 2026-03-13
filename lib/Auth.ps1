@@ -47,6 +47,8 @@ Add-Type -AssemblyName System.Security
 Set-StrictMode -Version Latest
 
 # Action -> minimum required role (fail-safe: unlisted actions = denied)
+$Script:SecurityWarningShown = $false
+
 $Script:ActionRoleMap = @{
     'RunTask'            = 'Operator'
     'ViewHistory'        = 'Operator'
@@ -158,7 +160,10 @@ function Assert-SecurityConfigPopulated {
             ''
         ) -join "`n"
         if ($ErrorOnEmpty) { throw $msg }
-        Write-Warning $msg
+        if (-not $Script:SecurityWarningShown) {
+            Write-Warning $msg
+            $Script:SecurityWarningShown = $true
+        }
     }
 }
 

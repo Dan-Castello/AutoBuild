@@ -1,3 +1,14 @@
-{"ts":"2026-03-12T23:20:37-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"UI_OPEN","target":"","detail":"Role=Operator User=DanCastello"}
-{"ts":"2026-03-12T23:21:13-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"RUN_DIAGNOSTICS","target":"","detail":"OK=21 WARN=0 ERR=0"}
-{"ts":"2026-03-12T23:21:19-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"UI_CLOSE","target":"","detail":""}
+{"ts":"2026-03-13T02:17:56-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"UI_OPEN","target":"","detail":"Role=Operator User=DanCastello"}
+{"ts":"2026-03-13T02:17:59-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"EXECUTE_TASK","target":"deep_audit","detail":"WhatIf=False Checkpoint=False Resume=False"}
+{"ts":"2026-03-13T02:21:06-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"UI_OPEN","target":"","detail":"Role=Operator User=DanCastello"}
+{"ts":"2026-03-13T02:21:10-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"EXECUTE_TASK","target":"deep_audit","detail":"WhatIf=False Checkpoint=False Resume=False"}
+{"ts":"2026-03-13T02:23:12-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"UI_OPEN","target":"","detail":"Role=Operator User=DanCastello"}
+{"ts":"2026-03-13T02:23:17-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"EXECUTE_TASK","target":"test_csv","detail":"WhatIf=False Checkpoint=False Resume=False"}
+{"ts":"2026-03-13T02:46:44-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"UI_OPEN","target":"","detail":"Role=Operator User=DanCastello"}
+{"ts":"2026-03-13T02:46:47-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"EXECUTE_TASK","target":"deep_audit","detail":"WhatIf=False Checkpoint=False Resume=False"}
+{"ts":"2026-03-13T02:48:32-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"UI_OPEN","target":"","detail":"Role=Operator User=DanCastello"}
+{"ts":"2026-03-13T02:48:36-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"EXECUTE_TASK","target":"deep_audit","detail":"WhatIf=False Checkpoint=False Resume=False"}
+{"ts":"2026-03-13T02:50:01-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"UI_OPEN","target":"","detail":"Role=Operator User=DanCastello"}
+{"ts":"2026-03-13T02:50:06-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"EXECUTE_TASK","target":"deep_audit","detail":"WhatIf=False Checkpoint=False Resume=False"}
+{"ts":"2026-03-13T02:52:23-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"UI_OPEN","target":"","detail":"Role=Operator User=DanCastello"}
+{"ts":"2026-03-13T02:52:27-06:00","user":"DanCastello","role":"Operator","hostname":"DESKTOP-O8KBLGE","action":"EXECUTE_TASK","target":"deep_audit","detail":"WhatIf=False Checkpoint=False Resume=False"}

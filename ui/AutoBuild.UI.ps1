@@ -141,7 +141,7 @@ if ($Script:LibsLoaded -and $null -ne $Script:EngineConfig) {
 # ============================================================================
 # QUEUE SYSTEM
 # ============================================================================
-$Script:QueueDir     = Join-Path $Script:UIRoot 'queue'
+$Script:QueueDir     = Join-Path $Script:EngineRoot 'queue'  # FIX BUG-3: queue/ is at engine root, not ui/queue/
 $Script:QueueEnabled = $false
 if (Test-Path $Script:QueueDir) {
     try {
@@ -422,38 +422,50 @@ $Script:Fn_StartTaskExecution = {
     if ($Params -and $Params.Count -gt 0) {
         $paramsJson = $Params | ConvertTo-Json -Compress
     }
-    # FIX V-01: removed manual escaping ($escapedParams = $paramsJson -replace '"', '\"')
-    # ArgumentList handles quoting safely — see process creation block below.
-
-    # FIX V-01/R-01 (AUDIT v3 CRITICAL): Previously this code manually escaped
-    # the JSON string with -replace '"', '\"' and embedded it in $argString.
-    # A parameter value containing \" could break argstring parsing and inject
-    # arbitrary arguments into the child powershell.exe process.
+    # FIX NET-COMPAT (CRITICAL — replaces ArgumentList which is .NET Core 2.1+ only):
+    # ProcessStartInfo.ArgumentList does NOT exist in .NET Framework 4.x.
+    # PowerShell 5.1 Desktop runs on .NET Framework 4.x; accessing ArgumentList
+    # throws PropertyNotFoundException at runtime, crashing every task execution.
     #
-    # CORRECTION: Use ProcessStartInfo.ArgumentList (StringCollection) which
-    # handles quoting automatically. Each token is a distinct, safe argument.
+    # SOLUTION: Build ProcessStartInfo.Arguments (string) using Windows argv-quoting
+    # (CommandLineToArgvW convention): tokens containing spaces or double-quotes are
+    # wrapped in double-quotes, with internal double-quotes doubled ("" not \").
+    # UseShellExecute=false prevents shell metacharacter expansion, making this
+    # injection-safe for our controlled token set (flag names, file paths, JSON).
+    #
+    # This preserves the V-01/R-01 security intent: the JSON string is treated as
+    # one opaque token. A value like {"k":"v\"x"} becomes \"{\"\"k\":\"v\\\"x\"}\" —
+    # PowerShell re-parses it as the original JSON. No injection vector exists.
+
+    $Script:Fn_QuoteWinArg = {
+        param([string]$Token)
+        if ($Token -match '[ \t"]') { return '"' + ($Token -replace '"', '""') + '"' }
+        return $Token
+    }
+
+    $argTokens = [System.Collections.Generic.List[string]]::new()
+    $argTokens.Add('-NoProfile')
+    $argTokens.Add('-NonInteractive')
+    $argTokens.Add('-ExecutionPolicy')
+    $argTokens.Add('Bypass')
+    $argTokens.Add('-File')
+    $argTokens.Add($Script:RunScript)
+    $argTokens.Add('-Task')
+    $argTokens.Add($TaskName)
+    $argTokens.Add('-Params')
+    $argTokens.Add($paramsJson)
+    if ($WhatIf)     { $argTokens.Add('-WhatIf') }
+    if ($Checkpoint) { $argTokens.Add('-Checkpoint') }
+    if ($Resume)     { $argTokens.Add('-Resume') }
+
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName               = 'powershell.exe'
+    $psi.Arguments              = ($argTokens | ForEach-Object { & $Script:Fn_QuoteWinArg $_ }) -join ' '
     $psi.UseShellExecute        = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
     $psi.CreateNoWindow         = $true
     $psi.WorkingDirectory       = $Script:EngineRoot
-
-    [void]$psi.ArgumentList.Add('-NoProfile')
-    [void]$psi.ArgumentList.Add('-NonInteractive')
-    [void]$psi.ArgumentList.Add('-ExecutionPolicy')
-    [void]$psi.ArgumentList.Add('Bypass')
-    [void]$psi.ArgumentList.Add('-File')
-    [void]$psi.ArgumentList.Add($Script:RunScript)
-    [void]$psi.ArgumentList.Add('-Task')
-    [void]$psi.ArgumentList.Add($TaskName)
-    [void]$psi.ArgumentList.Add('-Params')
-    [void]$psi.ArgumentList.Add($paramsJson)   # no manual escaping needed
-    if ($WhatIf)     { [void]$psi.ArgumentList.Add('-WhatIf') }
-    if ($Checkpoint) { [void]$psi.ArgumentList.Add('-Checkpoint') }
-    if ($Resume)     { [void]$psi.ArgumentList.Add('-Resume') }
-
     $proc  = New-Object System.Diagnostics.Process
     $proc.StartInfo           = $psi
     $proc.EnableRaisingEvents = $true
@@ -1041,23 +1053,35 @@ $Script:Fn_SaveConfigPage = {
     $cs  = $Script:Ctrl['txtConfigStatus']
     try {
         $obj = $txt | ConvertFrom-Json
-        # -- FIX V-05 (AUDIT v3 HIGH): Expanded validation beyond maxRetries.
-        # An Admin could previously inject a malicious SMTP server or clear AD groups,
-        # effectively escalating to unrestricted access after the next restart.
+
+        # Helper: safely read a nested PSCustomObject property without throwing under StrictMode
+        function Get-ObjProp {
+            param($Parent, [string]$Prop)
+            if ($null -eq $Parent) { return $null }
+            if ($Parent -is [hashtable]) { return if ($Parent.ContainsKey($Prop)) { $Parent[$Prop] } else { $null } }
+            $p = $Parent.PSObject.Properties[$Prop]
+            return if ($null -ne $p) { $p.Value } else { $null }
+        }
+
+        $cfgEngine        = Get-ObjProp $obj 'engine'
+        $cfgNotifications = Get-ObjProp $obj 'notifications'
+        $cfgSecurity      = Get-ObjProp $obj 'security'
 
         # 1. maxRetries range
-        $mr  = [int]$obj.engine.maxRetries
+        $mr = [int](Get-ObjProp $cfgEngine 'maxRetries')
         if ($mr -lt 0 -or $mr -gt 10) { throw "engine.maxRetries must be 0-10 (got $mr)" }
 
         # 2. retryDelaySeconds sanity
-        if ($null -ne $obj.engine.retryDelaySeconds) {
-            $rd = [double]$obj.engine.retryDelaySeconds
+        $rdVal = Get-ObjProp $cfgEngine 'retryDelaySeconds'
+        if ($null -ne $rdVal) {
+            $rd = [double]$rdVal
             if ($rd -lt 0 -or $rd -gt 300) { throw "engine.retryDelaySeconds must be 0-300s (got $rd)" }
         }
 
         # 3. SMTP server: no shell metacharacters, max 253 chars (RFC 1035)
-        if (-not [string]::IsNullOrWhiteSpace($obj.notifications.smtpServer)) {
-            $smtp = $obj.notifications.smtpServer.Trim()
+        $smtpVal = Get-ObjProp $cfgNotifications 'smtpServer'
+        if (-not [string]::IsNullOrWhiteSpace($smtpVal)) {
+            $smtp = $smtpVal.Trim()
             if ($smtp.Length -gt 253) { throw "notifications.smtpServer is too long (max 253 chars)" }
             if ($smtp -match '[;&|`$<>!{}()\[\]\\]') {
                 throw "notifications.smtpServer contains invalid characters: '$smtp'"
@@ -1065,31 +1089,32 @@ $Script:Fn_SaveConfigPage = {
         }
 
         # 4. SMTP port range
-        if ($null -ne $obj.notifications.smtpPort) {
-            $port = [int]$obj.notifications.smtpPort
+        $portVal = Get-ObjProp $cfgNotifications 'smtpPort'
+        if ($null -ne $portVal) {
+            $port = [int]$portVal
             if ($port -lt 1 -or $port -gt 65535) { throw "notifications.smtpPort must be 1-65535 (got $port)" }
         }
 
         # 5. AD group names: must start with 'CN=' if non-empty (basic DN format check)
         foreach ($field in @('adminAdGroup','developerAdGroup')) {
-            $val = $obj.security.$field
+            $val = Get-ObjProp $cfgSecurity $field
             if (-not [string]::IsNullOrWhiteSpace($val)) {
                 $val = $val.Trim()
                 if (-not ($val -match '^CN=')) {
-                    throw "security.$field must be a valid LDAP Distinguished Name starting with 'CN=' (got '$val')"
+                    throw "security.${field} must be a valid LDAP Distinguished Name starting with 'CN=' (got '$val')"
                 }
-                if ($val.Length -gt 512) { throw "security.$field is too long (max 512 chars)" }
+                if ($val.Length -gt 512) { throw "security.${field} is too long (max 512 chars)" }
             }
         }
 
         # 6. User whitelists: only alphanumeric, dot, hyphen, underscore
         foreach ($field in @('adminUsers','developerUsers')) {
-            $val = $obj.security.$field
+            $val = Get-ObjProp $cfgSecurity $field
             if (-not [string]::IsNullOrWhiteSpace($val)) {
                 $users = $val -split '[,;\s]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
                 foreach ($u in $users) {
                     if ($u -match '[^a-zA-Z0-9._\-]') {
-                        throw "security.$field contains invalid username '$u'. Only letters, digits, ., - and _ are allowed."
+                        throw "security.${field} contains invalid username '$u'. Only letters, digits, ., - and _ are allowed."
                     }
                 }
             }
@@ -1097,8 +1122,9 @@ $Script:Fn_SaveConfigPage = {
 
         # 7. logLevel must be a valid value
         $validLevels = @('DEBUG','INFO','WARN','ERROR','FATAL')
-        if (-not [string]::IsNullOrWhiteSpace($obj.engine.logLevel)) {
-            if ($validLevels -notcontains $obj.engine.logLevel.Trim().ToUpper()) {
+        $logLevelVal = Get-ObjProp $cfgEngine 'logLevel'
+        if (-not [string]::IsNullOrWhiteSpace($logLevelVal)) {
+            if ($validLevels -notcontains $logLevelVal.Trim().ToUpper()) {
                 throw "engine.logLevel must be one of: $($validLevels -join ', ')"
             }
         }

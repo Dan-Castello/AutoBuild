@@ -39,46 +39,67 @@ function Test-EngineConfigObject {
 
     $errors = [System.Collections.Generic.List[string]]::new()
 
+    # Helper: safely get a property from a PSCustomObject without throwing under StrictMode
+    function Get-SafeProp {
+        param($Obj, [string]$Prop)
+        if ($null -eq $Obj) { return $null }
+        if ($Obj -is [hashtable]) {
+            if ($Obj.ContainsKey($Prop)) { return $Obj[$Prop] }
+            return $null
+        }
+        $p = $Obj.PSObject.Properties[$Prop]
+        if ($null -eq $p) { return $null }
+        return $p.Value
+    }
+
+    $cfgEngine        = Get-SafeProp $ConfigObject 'engine'
+    $cfgNotifications = Get-SafeProp $ConfigObject 'notifications'
+    $cfgSecurity      = Get-SafeProp $ConfigObject 'security'
+
     # maxRetries
     try {
-        $mr = [int]$ConfigObject.engine.maxRetries
+        $mr = [int](Get-SafeProp $cfgEngine 'maxRetries')
         if ($mr -lt 0 -or $mr -gt 10) { $errors.Add("engine.maxRetries must be 0-10 (got $mr)") }
     } catch { $errors.Add("engine.maxRetries is not a valid integer") }
 
     # retryDelaySeconds
     try {
-        if ($null -ne $ConfigObject.engine.retryDelaySeconds) {
-            $rd = [double]$ConfigObject.engine.retryDelaySeconds
+        $rd_val = Get-SafeProp $cfgEngine 'retryDelaySeconds'
+        if ($null -ne $rd_val) {
+            $rd = [double]$rd_val
             if ($rd -lt 0 -or $rd -gt 300) { $errors.Add("engine.retryDelaySeconds must be 0-300 (got $rd)") }
         }
     } catch { $errors.Add("engine.retryDelaySeconds is not a valid number") }
 
     # logLevel
     $validLevels = @('DEBUG','INFO','WARN','ERROR','FATAL')
-    if (-not [string]::IsNullOrWhiteSpace($ConfigObject.engine.logLevel)) {
-        if ($validLevels -notcontains $ConfigObject.engine.logLevel.Trim().ToUpper()) {
+    $logLevelVal = Get-SafeProp $cfgEngine 'logLevel'
+    if (-not [string]::IsNullOrWhiteSpace($logLevelVal)) {
+        if ($validLevels -notcontains $logLevelVal.Trim().ToUpper()) {
             $errors.Add("engine.logLevel must be one of: $($validLevels -join ', ')")
         }
     }
 
     # smtpServer
-    if (-not [string]::IsNullOrWhiteSpace($ConfigObject.notifications.smtpServer)) {
-        $smtp = $ConfigObject.notifications.smtpServer.Trim()
+    $smtpVal = Get-SafeProp $cfgNotifications 'smtpServer'
+    if (-not [string]::IsNullOrWhiteSpace($smtpVal)) {
+        $smtp = $smtpVal.Trim()
         if ($smtp.Length -gt 253) { $errors.Add("notifications.smtpServer too long (max 253 chars)") }
         if ($smtp -match '[;&|`$<>!{}()\[\]\\]') { $errors.Add("notifications.smtpServer contains invalid characters") }
     }
 
     # smtpPort
     try {
-        if ($null -ne $ConfigObject.notifications.smtpPort) {
-            $port = [int]$ConfigObject.notifications.smtpPort
+        $portVal = Get-SafeProp $cfgNotifications 'smtpPort'
+        if ($null -ne $portVal) {
+            $port = [int]$portVal
             if ($port -lt 1 -or $port -gt 65535) { $errors.Add("notifications.smtpPort must be 1-65535 (got $port)") }
         }
     } catch { $errors.Add("notifications.smtpPort is not a valid integer") }
 
     # AD groups (must start with CN= if non-empty)
     foreach ($field in @('adminAdGroup','developerAdGroup')) {
-        $val = $ConfigObject.security.$field
+        $val = Get-SafeProp $cfgSecurity $field
         if (-not [string]::IsNullOrWhiteSpace($val)) {
             $val = $val.Trim()
             if (-not ($val -match '^CN=')) { $errors.Add("security.$field must be a valid DN starting with 'CN='") }
@@ -88,18 +109,18 @@ function Test-EngineConfigObject {
 
     # User whitelists
     foreach ($field in @('adminUsers','developerUsers')) {
-        $val = $ConfigObject.security.$field
+        $val = Get-SafeProp $cfgSecurity $field
         if (-not [string]::IsNullOrWhiteSpace($val)) {
             $users = $val -split '[,;\s]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
             foreach ($u in $users) {
                 if ($u -match '[^a-zA-Z0-9._\-]') {
-                    $errors.Add("security.$field: invalid username '$u' (only letters, digits, ., -, _ allowed)")
+                    $errors.Add("security.${field}: invalid username '$u' (only letters, digits, ., -, _ allowed)")
                 }
             }
         }
     }
 
-    return $errors.ToArray()
+    return [string[]]$errors.ToArray()
 }
 
 function Save-EngineConfig {

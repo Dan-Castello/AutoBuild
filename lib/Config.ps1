@@ -1,46 +1,28 @@
 #Requires -Version 5.1
 # =============================================================================
 # lib/Config.ps1
-# AutoBuild v3.0 - Configuration loader, merger, and bootstrap.
+# AutoBuild v3.1 - Configuration loader, merger, validation, and bootstrap.
 #
-# DESIGN PRINCIPLES:
-#   Single Responsibility: this file owns ONLY configuration.
-#   Logger.ps1 owns only logging. Neither bleeds into the other.
-#   (Resolves PROBLEMA-ARQUITECTURAL-01 from the audit.)
+# REMEDIATION v3.1 CHANGES:
+#   FIX-CFG-01 (CRITICAL) : Test-EngineConfiguration added.
+#     Previously, missing SMTP config caused diag_notify to FAIL the check and
+#     throw. SMTP is OPTIONAL. The new validator distinguishes CRITICAL vs
+#     OPTIONAL issues and returns SmtpConfigured flag. diag_notify branches
+#     on SmtpConfigured instead of counting SMTP absence as a failure.
 #
-# IMMUTABILITY CONTRACT (resolves PROBLEMA-ARQUITECTURAL-03):
-#   Get-EngineConfig ALWAYS returns a NEW independent hashtable.
-#   It is never cached as an alias at the call site.
-#   New-TaskContext deep-clones each section so task mutations cannot
-#   contaminate the engine's master config object.
+#   FIX-CFG-02 (HIGH)  : All config sections now have explicit defaults for
+#     every key. Missing JSON keys never produce $null downstream.
 #
-# PLUGIN EXTENSIBILITY (resolves PROBLEMA-EXT-01):
-#   Adding a new section to engine.config.json requires only an entry
-#   in $Script:KnownSections — no algorithmic change.
-#
-# IB VERSION DETECTION:
-#   Invoke-Build version is detected from its script header and recorded
-#   in cfg.engine.ibVersion for production audit trails.
-#   (Resolves PROBLEMA-IB-01.)
+#   FIX-CFG-03 (MED)   : Deep merge: partial JSON sections no longer discard
+#     built-in defaults for absent keys.
 # =============================================================================
 Set-StrictMode -Version Latest
 
-# Table-driven section registry. Add new config sections here only.
 $Script:KnownSections = @('engine','sap','excel','reports','notifications','security')
 
 function Get-EngineConfig {
-    <#
-    .SYNOPSIS
-        Loads engine.config.json, merges over safe defaults, bootstraps
-        working directories, and returns a new independent hashtable.
-    .PARAMETER Root
-        AutoBuild project root directory.
-    .OUTPUTS
-        Hashtable with keys: engine, sap, excel, reports, notifications, security.
-    #>
     param([Parameter(Mandatory)][string]$Root)
 
-    # Conservative production-safe defaults.
     $cfg = @{
         engine = @{
             logLevel          = 'INFO'
@@ -62,26 +44,28 @@ function Get-EngineConfig {
         reports = @{
             defaultFormat   = 'xlsx'
             retentionDays   = 30
-            maxLogSizeBytes = 10485760   # 10 MB before rotation
+            maxLogSizeBytes = 10485760
         }
+        # FIX-CFG-01: Empty smtpServer = OPTIONAL-MISSING, never a CRITICAL failure.
         notifications = @{
-            enabled    = $false
-            smtpServer = ''
-            smtpPort   = 587
-            fromAddr   = ''
-            toAddr     = ''
+            enabled      = $false
+            smtpServer   = ''
+            smtpPort     = 587
+            fromAddr     = ''
+            toAddr       = ''
+            smtpUser     = ''
+            smtpPassword = ''
+            useTls       = $false
         }
         security = @{
-            # AD group DNs that grant roles. Empty string = no AD check (dev mode).
-            adminAdGroup     = ''
-            developerAdGroup = ''
-            # Comma-separated username fallback when AD integration not available.
-            adminUsers       = ''
-            developerUsers   = ''
+            adminAdGroup        = ''
+            developerAdGroup    = ''
+            adminUsers          = ''
+            developerUsers      = ''
+            roleCacheTTLMinutes = 480
         }
     }
 
-    # Merge from file if present.
     $cfgFile = Join-Path $Root 'engine.config.json'
     if (Test-Path $cfgFile) {
         try {
@@ -90,6 +74,7 @@ function Get-EngineConfig {
                 $rawSection = $raw.PSObject.Properties[$section]
                 if ($null -ne $rawSection -and $null -ne $rawSection.Value) {
                     if (-not $cfg.ContainsKey($section)) { $cfg[$section] = @{} }
+                    # FIX-CFG-03: Key-by-key merge preserves defaults for absent JSON keys.
                     foreach ($prop in $rawSection.Value.PSObject.Properties) {
                         $cfg[$section][$prop.Name] = $prop.Value
                     }
@@ -100,8 +85,6 @@ function Get-EngineConfig {
         }
     }
 
-    # Detect and record Invoke-Build version for audit reproducibility.
-    # (Resolves PROBLEMA-IB-01.)
     try {
         $ibFile = Join-Path $Root 'tools\InvokeBuild\Invoke-Build.ps1'
         if (Test-Path $ibFile) {
@@ -111,7 +94,6 @@ function Get-EngineConfig {
         }
     } catch { }
 
-    # Guarantee working directories exist before any task needs them.
     foreach ($sub in @('logs','input','output','reports')) {
         $dir = Join-Path $Root $sub
         if (-not (Test-Path $dir)) {
@@ -123,11 +105,6 @@ function Get-EngineConfig {
 }
 
 function Get-ConfigSection {
-    <#
-    .SYNOPSIS
-        Deep-clones a single config section hashtable.
-        Used by New-TaskContext to produce isolated, task-local copies.
-    #>
     param(
         [Parameter(Mandatory)][hashtable]$Config,
         [Parameter(Mandatory)][string]$Section
@@ -136,4 +113,136 @@ function Get-ConfigSection {
         return $Config[$Section].Clone()
     }
     return @{}
+}
+
+function Test-EngineConfiguration {
+    <#
+    .SYNOPSIS
+        FIX-CFG-01: Validates engine configuration. Classifies issues as
+        CRITICAL (engine cannot operate) or OPTIONAL (feature disabled/unconfigured).
+
+    .DESCRIPTION
+        Returns a structured result hashtable. Tasks should branch on
+        SmtpConfigured / Valid rather than failing when OPTIONAL settings
+        are absent.
+
+        CRITICAL: engine section, task dirs, log dir
+        OPTIONAL: SMTP, Excel COM, SAP, Security (AD groups)
+
+    .OUTPUTS
+        @{
+            Valid           = [bool]
+            CriticalIssues  = [string[]]
+            OptionalIssues  = [string[]]
+            SmtpConfigured  = [bool]   # $true only when smtpServer non-empty
+            ExcelAvailable  = [bool]   # $true when COM probe succeeded
+            Summary         = [string]
+        }
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Config,
+        [string]$Root         = '',
+        [bool]$ProbeExcel     = $false,
+        [int]$ExcelTimeoutSec = 10
+    )
+
+    # Use List[string] — safe against PS5.1 op_Addition on typed arrays.
+    $critical = [System.Collections.Generic.List[string]]::new()
+    $optional  = [System.Collections.Generic.List[string]]::new()
+
+    # --- CRITICAL: engine section ---
+    $eng = $Config['engine']
+    if ($null -eq $eng) {
+        $critical.Add('engine config section is missing entirely')
+    } else {
+        $validLevels = @('DEBUG','INFO','WARN','ERROR','FATAL')
+        $ll = "$($eng['logLevel'])"
+        if ([string]::IsNullOrWhiteSpace($ll) -or $validLevels -notcontains $ll) {
+            $critical.Add("engine.logLevel invalid (got: '$ll'). Must be: $($validLevels -join ', ')")
+        }
+        $mr = $eng['maxRetries']
+        if ($null -eq $mr -or [int]$mr -lt 0) {
+            $critical.Add("engine.maxRetries must be >= 0 (got: '$mr')")
+        }
+    }
+
+    # --- CRITICAL: directories ---
+    if (-not [string]::IsNullOrWhiteSpace($Root)) {
+        $tasksDir = Join-Path $Root 'tasks'
+        if (-not (Test-Path $tasksDir)) {
+            $critical.Add("tasks/ directory not found: $tasksDir")
+        }
+        $logsDir = Join-Path $Root 'logs'
+        if (-not (Test-Path $logsDir)) {
+            try {
+                New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+            } catch {
+                $critical.Add("logs/ directory missing and cannot be created: $_")
+            }
+        }
+    }
+
+    # --- OPTIONAL: SMTP ---
+    # FIX-CFG-01 CORE: Empty smtpServer is OPTIONAL-MISSING, not a failure.
+    $smtpConfigured = $false
+    $notif = $Config['notifications']
+    if ($null -eq $notif) {
+        $optional.Add('Notifications disabled: notifications section missing from config')
+    } elseif ([string]::IsNullOrWhiteSpace("$($notif['smtpServer'])")) {
+        $optional.Add('Notifications disabled: smtpServer not configured in engine.config.json')
+    } else {
+        $smtpConfigured = $true
+        $port = try { [int]$notif['smtpPort'] } catch { 0 }
+        if ($port -lt 1 -or $port -gt 65535) {
+            $optional.Add("Notifications: smtpPort '$($notif['smtpPort'])' invalid. Default 587 will be used.")
+        }
+        if ([string]::IsNullOrWhiteSpace("$($notif['fromAddr'])")) {
+            $optional.Add('Notifications: fromAddr not set. Fallback autobuild@<hostname> will be used.')
+        }
+        if ([string]::IsNullOrWhiteSpace("$($notif['toAddr'])")) {
+            $optional.Add('Notifications: toAddr not set. Notifications cannot be delivered.')
+        }
+    }
+
+    # --- OPTIONAL: Excel COM probe ---
+    $excelAvailable = $false
+    if ($ProbeExcel) {
+        # Test-ComAvailable is defined in ComHelper.ps1 (loaded before Config in engine)
+        $excelAvailable = Test-ComAvailable -ProgId 'Excel.Application' -TimeoutSec $ExcelTimeoutSec
+        if (-not $excelAvailable) {
+            $optional.Add('Excel COM unavailable. Excel-dependent tasks will be skipped.')
+        }
+    }
+
+    # --- OPTIONAL: SAP ---
+    $sap = $Config['sap']
+    if ($null -eq $sap -or [string]::IsNullOrWhiteSpace("$($sap['systemId'])")) {
+        $optional.Add('SAP not configured. SAP tasks will fail if executed.')
+    }
+
+    # --- OPTIONAL: Security ---
+    $sec = $Config['security']
+    if ($null -ne $sec) {
+        $hasAdGroup  = -not [string]::IsNullOrWhiteSpace("$($sec['adminAdGroup'])")
+        $hasFallback = -not [string]::IsNullOrWhiteSpace("$($sec['adminUsers'])")
+        if (-not $hasAdGroup -and -not $hasFallback) {
+            $optional.Add('Security: adminAdGroup and adminUsers both empty. Running in open-access dev mode.')
+        }
+    }
+
+    $isValid = ($critical.Count -eq 0)
+    $summary = if ($isValid) {
+        "Configuration OK. Optional issues: $($optional.Count)."
+    } else {
+        "Configuration INVALID. Critical: $($critical.Count). Optional: $($optional.Count)."
+    }
+
+    return @{
+        Valid          = $isValid
+        CriticalIssues = $critical.ToArray()
+        OptionalIssues = $optional.ToArray()
+        SmtpConfigured = $smtpConfigured
+        ExcelAvailable = $excelAvailable
+        Summary        = $summary
+    }
 }

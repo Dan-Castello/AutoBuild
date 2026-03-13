@@ -1,0 +1,304 @@
+﻿{
+    "checks":  [
+                   {
+                       "Detail":  "5.1.19041.6456",
+                       "Section":  "Entorno",
+                       "Pass":  true,
+                       "Name":  "PS Version 5.1+"
+                   },
+                   {
+                       "Detail":  "Desktop",
+                       "Section":  "Entorno",
+                       "Pass":  true,
+                       "Name":  "PS Edition Desktop"
+                   },
+                   {
+                       "Detail":  "Microsoft Windows NT 10.0.19045.0",
+                       "Section":  "Entorno",
+                       "Pass":  true,
+                       "Name":  "SO Windows detectado"
+                   },
+                   {
+                       "Detail":  "Build=19045",
+                       "Section":  "Entorno",
+                       "Pass":  true,
+                       "Name":  "OS Build \u003e= 17763 (Win10 1809+)"
+                   },
+                   {
+                       "Detail":  "4.0.30319.42000",
+                       "Section":  "Entorno",
+                       "Pass":  true,
+                       "Name":  "CLR Version"
+                   },
+                   {
+                       "Detail":  "Is64=True",
+                       "Section":  "Entorno",
+                       "Pass":  true,
+                       "Name":  "Proceso 64-bit"
+                   },
+                   {
+                       "Detail":  "Libre=432.95GB en C:",
+                       "Section":  "Entorno",
+                       "Pass":  true,
+                       "Name":  "Disco libre \u003e= 500MB en reports"
+                   },
+                   {
+                       "Detail":  "C:\\Users\\DanCastello\\Documents\\automation_framework\\AutoBuild_v3_3_deep_audit\\AutoBuild_v3_2_FIXED\\reports",
+                       "Section":  "Entorno",
+                       "Pass":  true,
+                       "Name":  "Directorio reports accesible"
+                   },
+                   {
+                       "Detail":  "Heap=41.8MB",
+                       "Section":  "Entorno",
+                       "Pass":  true,
+                       "Name":  "Heap .NET \u003c 500MB"
+                   },
+                   {
+                       "Detail":  "IsAdmin=False",
+                       "Section":  "Entorno",
+                       "Pass":  true,
+                       "Name":  "Proceso con privilegios admin (informativo)"
+                   },
+                   {
+                       "Detail":  "",
+                       "Section":  "Entorno",
+                       "Pass":  true,
+                       "Name":  "Set-StrictMode operativo"
+                   },
+                   {
+                       "Detail":  "C:\\Users\\DanCastello\\Documents\\automation_framework\\AutoBuild_v3_3_deep_audit\\AutoBuild_v3_2_FIXED\\engine.config.json",
+                       "Section":  "Config",
+                       "Pass":  true,
+                       "Name":  "engine.config.json existe"
+                   },
+                   {
+                       "Detail":  "",
+                       "Section":  "Config",
+                       "Pass":  true,
+                       "Name":  "Seccion \u0027engine\u0027 presente"
+                   },
+                   {
+                       "Detail":  "",
+                       "Section":  "Config",
+                       "Pass":  true,
+                       "Name":  "Seccion \u0027sap\u0027 presente"
+                   },
+                   {
+                       "Detail":  "",
+                       "Section":  "Config",
+                       "Pass":  true,
+                       "Name":  "Seccion \u0027excel\u0027 presente"
+                   },
+                   {
+                       "Detail":  "",
+                       "Section":  "Config",
+                       "Pass":  true,
+                       "Name":  "Seccion \u0027reports\u0027 presente"
+                   },
+                   {
+                       "Detail":  "",
+                       "Section":  "Config",
+                       "Pass":  true,
+                       "Name":  "Seccion \u0027notifications\u0027 presente"
+                   },
+                   {
+                       "Detail":  "",
+                       "Section":  "Config",
+                       "Pass":  true,
+                       "Name":  "Seccion \u0027security\u0027 presente"
+                   },
+                   {
+                       "Detail":  "INFO",
+                       "Section":  "Config",
+                       "Pass":  true,
+                       "Name":  "logLevel valido"
+                   },
+                   {
+                       "Detail":  "maxRetries=3",
+                       "Section":  "Config",
+                       "Pass":  true,
+                       "Name":  "maxRetries 1-10"
+                   },
+                   {
+                       "Detail":  "Modo=PROD",
+                       "Section":  "Config",
+                       "Pass":  true,
+                       "Name":  "Modo seguridad configurado"
+                   },
+                   {
+                       "Detail":  "",
+                       "Section":  "Excel",
+                       "Pass":  true,
+                       "Name":  "Excel.Application COM disponible"
+                   },
+                   {
+                       "Detail":  "",
+                       "Section":  "Excel",
+                       "Pass":  true,
+                       "Name":  "New-ExcelApp devuelve instancia"
+                   },
+                   {
+                       "Detail":  "PID=19144",
+                       "Section":  "Excel",
+                       "Pass":  true,
+                       "Name":  "PID de Excel capturado"
+                   },
+                   {
+                       "Detail":  "",
+                       "Section":  "Excel",
+                       "Pass":  true,
+                       "Name":  "Workbook creado"
+                   },
+                   {
+                       "Detail":  "",
+                       "Section":  "Excel",
+                       "Pass":  true,
+                       "Name":  "Sheet 1 obtenido"
+                   },
+                   {
+                       "Detail":  "",
+                       "Section":  "Excel",
+                       "Pass":  true,
+                       "Name":  "Escritura masiva 200 filas (Export-Csv)"
+                   },
+                   {
+                       "Detail":  "C:\\Users\\DanCastello\\Documents\\automation_framework\\AutoBuild_v3_3_deep_audit\\AutoBuild_v3_2_FIXED\\reports\\deep_audit_20260313_025009.xlsx",
+                       "Section":  "Excel",
+                       "Pass":  true,
+                       "Name":  "Guardado como .xlsx"
+                   },
+                   {
+                       "Detail":  "Esperado=201 ReadBack=201",
+                       "Section":  "Excel",
+                       "Pass":  true,
+                       "Name":  "Read-back filas correctas"
+                   },
+                   {
+                       "Detail":  "",
+                       "Section":  "Word",
+                       "Pass":  true,
+                       "Name":  "Word.Application COM disponible"
+                   },
+                   {
+                       "Detail":  "",
+                       "Section":  "Word",
+                       "Pass":  true,
+                       "Name":  "New-WordApp devuelve instancia"
+                   },
+                   {
+                       "Detail":  "",
+                       "Section":  "Word",
+                       "Pass":  true,
+                       "Name":  "New-WordDocument crea documento"
+                   },
+                   {
+                       "Detail":  "",
+                       "Section":  "Word",
+                       "Pass":  true,
+                       "Name":  "Get-WordSelection disponible"
+                   },
+                   {
+                       "Detail":  "18 lineas",
+                       "Section":  "Word",
+                       "Pass":  true,
+                       "Name":  "Parrafos escritos en documento"
+                   },
+                   {
+                       "Detail":  "C:\\Users\\DanCastello\\Documents\\automation_framework\\AutoBuild_v3_3_deep_audit\\AutoBuild_v3_2_FIXED\\reports\\deep_audit_20260313_025009.docx",
+                       "Section":  "Word",
+                       "Pass":  true,
+                       "Name":  "Guardado como .docx"
+                   },
+                   {
+                       "Detail":  "Resultado: No disponible: ProgId SapROTWr.SapROTWrapper no disponible: No se pudo recuperar el generador de clases COM para el componente con CLSID {00000000-0000-0000-0000-000000000000} debido al siguiente error: 80040154 Clase no registrada (Excepción de HRESULT: 0x80040154 (REGDB_E_CLASSNOTREG)).",
+                       "Section":  "SAP",
+                       "Pass":  true,
+                       "Name":  "SAP GUI Scripting COM"
+                   },
+                   {
+                       "Detail":  "client=800",
+                       "Section":  "SAP",
+                       "Pass":  true,
+                       "Name":  "Config SAP client 800 en engine.config"
+                   },
+                   {
+                       "Detail":  "No cargado (requiere SAP GUI instalado)",
+                       "Section":  "SAP",
+                       "Pass":  true,
+                       "Name":  "SapHelper disponible"
+                   },
+                   {
+                       "Detail":  "No activo (normal si SAP GUI no esta abierto)",
+                       "Section":  "SAP",
+                       "Pass":  true,
+                       "Name":  "Proceso SAP GUI activo"
+                   },
+                   {
+                       "Detail":  "Procesos huerfanos eliminados=2",
+                       "Section":  "Limpieza",
+                       "Pass":  true,
+                       "Name":  "Remove-ZombieCom ejecutado sin error"
+                   },
+                   {
+                       "Detail":  "Huerfanos=0",
+                       "Section":  "Limpieza",
+                       "Pass":  true,
+                       "Name":  "Sin procesos Office huerfanos (no engine)"
+                   },
+                   {
+                       "Detail":  "Heap=20.9MB",
+                       "Section":  "Limpieza",
+                       "Pass":  true,
+                       "Name":  "Heap tras GC \u003c 600MB"
+                   }
+               ],
+    "runId":  "20260313_025009_090BAE8D",
+    "hostname":  "DESKTOP-O8KBLGE",
+    "user":  "DanCastello",
+    "osVersion":  "Microsoft Windows NT 10.0.19045.0",
+    "sections":  [
+                     {
+                         "Section":  "Entorno",
+                         "Failed":  0,
+                         "Total":  11,
+                         "Passed":  11
+                     },
+                     {
+                         "Section":  "Config",
+                         "Failed":  0,
+                         "Total":  10,
+                         "Passed":  10
+                     },
+                     {
+                         "Section":  "Excel",
+                         "Failed":  0,
+                         "Total":  8,
+                         "Passed":  8
+                     },
+                     {
+                         "Section":  "Word",
+                         "Failed":  0,
+                         "Total":  6,
+                         "Passed":  6
+                     },
+                     {
+                         "Section":  "SAP",
+                         "Failed":  0,
+                         "Total":  4,
+                         "Passed":  4
+                     },
+                     {
+                         "Section":  "Limpieza",
+                         "Failed":  0,
+                         "Total":  3,
+                         "Passed":  3
+                     }
+                 ],
+    "psVersion":  "5.1.19041.6456",
+    "totalChecks":  42,
+    "totalPassed":  42,
+    "totalFailed":  0,
+    "osBuild":  19045,
+    "auditDate":  "2026-03-13T02:50:32-06:00"
+}

@@ -159,30 +159,38 @@ function Start-TaskProcess {
     # A parameter value containing \" could break the argstring parsing and
     # inject arbitrary arguments into the child powershell.exe process.
     #
-    # CORRECTION: Use ProcessStartInfo.ArgumentList (available in .NET 4.5+
-    # which ships with PS 5.1 on Windows 8.1+). ArgumentList is a StringCollection
-    # that handles quoting automatically — no manual escaping required or permitted.
+    # FIX NET-COMPAT (CRITICAL): Same as AutoBuild.UI.ps1.
+    # ProcessStartInfo.ArgumentList does not exist in .NET Framework 4.x.
+    # The comment "available in .NET 4.5+" was factually incorrect —
+    # ArgumentList was introduced in .NET Core 2.1+, never in .NET Framework.
+    # Using it on PS 5.1 Desktop throws PropertyNotFoundException at runtime.
+    #
+    # Fix: use ProcessStartInfo.Arguments (string) with Windows argv-quoting.
+    $quoteArg = {
+        param([string]$t)
+        if ($t -match '[ \t"]') { return '"' + ($t -replace '"', '""') + '"' }
+        return $t
+    }
+    $argTokens = [System.Collections.Generic.List[string]]::new()
+    $argTokens.Add('-NoProfile')
+    $argTokens.Add('-NonInteractive')
+    $argTokens.Add('-ExecutionPolicy')
+    $argTokens.Add('Bypass')
+    $argTokens.Add('-File')
+    $argTokens.Add($Script:Runner.RunScript)
+    $argTokens.Add('-Task')
+    $argTokens.Add($Task.TaskReference)
+    $argTokens.Add('-Params')
+    $argTokens.Add($paramsJson)
+
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName               = 'powershell.exe'
+    $psi.Arguments              = ($argTokens | ForEach-Object { & $quoteArg $_ }) -join ' '
     $psi.UseShellExecute        = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
     $psi.CreateNoWindow         = $true
     $psi.WorkingDirectory       = $Script:Runner.EngineRoot
-
-    # Build argument list via the safe collection API.
-    # Each argument is passed as a distinct token — no shell interpolation occurs.
-    [void]$psi.ArgumentList.Add('-NoProfile')
-    [void]$psi.ArgumentList.Add('-NonInteractive')
-    [void]$psi.ArgumentList.Add('-ExecutionPolicy')
-    [void]$psi.ArgumentList.Add('Bypass')
-    [void]$psi.ArgumentList.Add('-File')
-    [void]$psi.ArgumentList.Add($Script:Runner.RunScript)
-    [void]$psi.ArgumentList.Add('-Task')
-    [void]$psi.ArgumentList.Add($Task.TaskReference)
-    [void]$psi.ArgumentList.Add('-Params')
-    [void]$psi.ArgumentList.Add($paramsJson)   # no escaping — ArgumentList handles quoting
-
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo           = $psi
     $proc.EnableRaisingEvents = $true

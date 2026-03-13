@@ -801,11 +801,20 @@ Describe 'Integration: Full Log Write Cycle' {
 
         Write-BuildLog -Context $ctx -Level 'WARN' -Message 'jsonl validity check'
 
-        $line  = Get-Content (Join-Path $logsDir 'registry.jsonl') -Last 1 -Encoding ASCII
-        $entry = $null
-        { $entry = $line | ConvertFrom-Json } | Should -Not -Throw
-        $entry.task  | Should -Be 'jsonltest'
-        $entry.level | Should -Be 'WARN'
+        $line = Get-Content (Join-Path $logsDir 'registry.jsonl') -Last 1 -Encoding ASCII
+
+        # FIX: In Pester v5, a scriptblock passed to Should -Not -Throw runs in a
+        # child scope. Assignments inside that block do NOT propagate back to the It
+        # block scope, so $entry remains $null after the Should call — causing
+        # PropertyNotFoundException on $entry.task under Set-StrictMode -Version Latest.
+        #
+        # Correct pattern: parse directly in the It scope, then assert on the object.
+        # JSON validity is implicitly tested: ConvertFrom-Json throws on invalid input,
+        # which Pester catches and marks as a test failure with a clear parse error.
+        $entry = $line | ConvertFrom-Json
+        $entry        | Should -Not -BeNullOrEmpty
+        $entry.task   | Should -Be 'jsonltest'
+        $entry.level  | Should -Be 'WARN'
     }
 }
 
