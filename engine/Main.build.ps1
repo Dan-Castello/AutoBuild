@@ -71,6 +71,7 @@ $Script:EngineRoot = Split-Path $BuildRoot -Parent
 $Script:LibLoadOrder = @(
     'Config.ps1',
     'Logger.ps1',
+    'Notifications.ps1',   # FIX SMTP-MISSING: implements Send-Notification
     'Context.ps1',
     'Auth.ps1',
     'Retry.ps1',
@@ -101,6 +102,16 @@ $Script:EngineConfig = Get-EngineConfig -Root $Script:EngineRoot
 
 if ($null -eq $Script:EngineConfig -or $Script:EngineConfig.Count -eq 0) {
     throw 'AutoBuild engine: Get-EngineConfig returned null or empty. Check Config.ps1 and engine.config.json.'
+}
+
+# FIX PROD-GUARD (AUDIT v3): Warn when all security identifiers are empty.
+# This prevents the engine silently starting in 'dev mode' (Operator-for-everyone)
+# when deployed to production without security group configuration.
+try {
+    Assert-SecurityConfigPopulated -Config $Script:EngineConfig -ErrorOnEmpty:$false
+} catch {
+    # Assert-SecurityConfigPopulated not yet loaded (library load order race).
+    Write-Warning "AutoBuild: Could not validate security config. Ensure adminAdGroup or adminUsers are set before production deployment."
 }
 
 # ============================================================================
@@ -135,28 +146,65 @@ function Invoke-LoadTask {
         throw "AutoBuild: task file not found: task_${TaskName}.ps1 in $Script:TasksPath"
     }
 
-    # TASK-02 fix: verify hash integrity if a registry exists.
-    # Hash checking is opt-in: only activated when tasks.hash.json is present.
-    # Use Update-TaskRegistry to create/refresh the registry after deploying tasks.
+    # FIX V-02/R-02 (AUDIT v3 HIGH): Race condition between Test-TaskIntegrity
+    # and actual file load. The previous implementation:
+    #   1. Test-TaskIntegrity reads file, computes hash, checks registry
+    #   2. [~50ms window where an attacker can swap the file]
+    #   3. . $file (loads the potentially-swapped file)
+    #
+    # CORRECTION: Read the file bytes ONCE into memory, verify the in-memory
+    # hash against the registry, then dot-source from a temp path that was
+    # written from the verified in-memory bytes. This eliminates the TOCTOU window.
     $hashFile = Join-Path $Script:TasksPath 'tasks.hash.json'
     if (Test-Path $hashFile) {
         try {
-            $ok = Test-TaskIntegrity -FilePath $file -HashFile $hashFile -AllowUnregistered $false
-            if (-not $ok) {
-                throw "AutoBuild: task '$TaskName' failed integrity check. " +
+            # Load file bytes once to eliminate the TOCTOU race.
+            $fileBytes = [System.IO.File]::ReadAllBytes($file)
+            $sha       = [System.Security.Cryptography.SHA256]::Create()
+            try {
+                $actualHash = ([BitConverter]::ToString($sha.ComputeHash($fileBytes)) -replace '-','').ToLower()
+            } finally { $sha.Dispose() }
+
+            # Load registry and compare hash of the in-memory bytes.
+            $reg      = $null
+            $hashRaw  = Get-Content $hashFile -Raw -Encoding ASCII | ConvertFrom-Json
+            $fileName = [System.IO.Path]::GetFileName($file)
+            $regEntry = $hashRaw.PSObject.Properties[$fileName]
+
+            if ($null -eq $regEntry) {
+                throw "AutoBuild: task '$TaskName' is not in the hash registry. " +
                       "Run Update-TaskRegistry to register approved task files."
+            } elseif ($regEntry.Value.sha256 -ne $actualHash) {
+                throw "AutoBuild: HASH MISMATCH for task '$TaskName'. " +
+                      "Expected: $($regEntry.Value.sha256). Actual: $actualHash. " +
+                      "File may have been tampered with."
             }
+
+            # Hash verified. Write verified bytes to a temp location and dot-source from there.
+            # This ensures even if the original file is swapped after verification,
+            # we execute exactly what was hashed.
+            $verifiedTemp = [System.IO.Path]::GetTempFileName() + '.ps1'
+            try {
+                [System.IO.File]::WriteAllBytes($verifiedTemp, $fileBytes)
+                . $verifiedTemp
+            } finally {
+                Remove-Item $verifiedTemp -Force -ErrorAction SilentlyContinue
+            }
+
         } catch [System.Management.Automation.CommandNotFoundException] {
-            # Integrity.ps1 not loaded yet (first call) - safe to continue
+            # Integrity functions not available (first call before full bootstrap). Proceed.
+            . $file
+        } catch {
+            throw "AutoBuild: integrity check failed for task '$TaskName'. $_"
+        }
+    } else {
+        try {
+            . $file
+        } catch {
+            throw "AutoBuild: failed to load task '$TaskName' from '$file'. Error: $_"
         }
     }
-
-    try {
-        . $file
-        [void]$Script:LoadedTasks.Add($TaskName)
-    } catch {
-        throw "AutoBuild: failed to load task '$TaskName' from '$file'. Error: $_"
-    }
+    [void]$Script:LoadedTasks.Add($TaskName)
 }
 
 # ============================================================================

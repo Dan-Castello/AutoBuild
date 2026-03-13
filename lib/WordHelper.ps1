@@ -57,7 +57,7 @@ function New-WordDocument {
         Write-BuildLog $Context 'ERROR' "Error al crear documento Word: $_"
         throw
     } finally {
-        if ($null -ne $docs) { Release-ComObject $docs; $docs = $null }
+        if ($null -ne $docs) { Invoke-ReleaseComObject $docs; $docs = $null }
     }
 }
 
@@ -86,7 +86,7 @@ function Open-WordDocument {
         Write-BuildLog $Context 'ERROR' "Error al abrir documento Word $Path : $_"
         throw
     } finally {
-        if ($null -ne $docs) { Release-ComObject $docs; $docs = $null }
+        if ($null -ne $docs) { Invoke-ReleaseComObject $docs; $docs = $null }
     }
 }
 
@@ -141,7 +141,7 @@ function Get-WordCharCount {
         $chars = $Document.Characters
         return $chars.Count
     } finally {
-        if ($null -ne $chars) { Release-ComObject $chars; $chars = $null }
+        if ($null -ne $chars) { Invoke-ReleaseComObject $chars; $chars = $null }
     }
 }
 
@@ -207,7 +207,7 @@ function Close-WordDocument {
     if ($null -eq $Document) { return }
     $saveFlag = if ($Save) { -1 } else { 0 }    # wdSaveChanges / wdDoNotSaveChanges
     try { $Document.Close($saveFlag) } catch {}
-    Release-ComObject $Document
+    Invoke-ReleaseComObject $Document
 
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()
@@ -227,7 +227,7 @@ function Close-WordApp {
 
     if ($null -eq $WordApp) { return }
     try { $WordApp.Quit(0) } catch {}
-    Release-ComObject $WordApp
+    Invoke-ReleaseComObject $WordApp
 
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()

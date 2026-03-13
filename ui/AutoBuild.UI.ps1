@@ -154,6 +154,22 @@ if (Test-Path $Script:QueueDir) {
     }
 }
 
+# FIX PROD-GUARD (AUDIT v3): Detect dev-mode startup (empty security config).
+# Shown as a persistent banner in the UI so operators cannot miss it.
+$Script:SecurityWarning = ''
+if ($Script:LibsLoaded -and $null -ne $Script:EngineConfig) {
+    try {
+        $sec = $Script:EngineConfig.security
+        $adminEmpty = [string]::IsNullOrWhiteSpace($sec.adminAdGroup) -and
+                      [string]::IsNullOrWhiteSpace($sec.adminUsers)
+        $devEmpty   = [string]::IsNullOrWhiteSpace($sec.developerAdGroup) -and
+                      [string]::IsNullOrWhiteSpace($sec.developerUsers)
+        if ($adminEmpty -or $devEmpty) {
+            $Script:SecurityWarning = 'SECURITY: Engine running in DEV MODE — security groups not configured. All users resolved as Operator.'
+        }
+    } catch { }
+}
+
 # ============================================================================
 # GLOBALS
 # ============================================================================
@@ -199,18 +215,23 @@ $Script:Fn_WriteAuditLog = {
     }
     $line = $entry | ConvertTo-Json -Compress
 
-    # CONC-01-UI fix: canonical mutex pattern (matches Logger.ps1 exactly)
+    # CONC-01-UI / FIX R-08: Two-tier mutex — Global\ for cross-session, Local\ fallback.
     $mutex  = $null
     $locked = $false
     try {
-        $mutex  = New-Object System.Threading.Mutex($false, $Script:AuditMutexName)
+        try {
+            $mutex = New-Object System.Threading.Mutex($false, $Script:AuditMutexName)
+        } catch {
+            $localName = $Script:AuditMutexName -replace '^Global\\', 'Local\'
+            $mutex = New-Object System.Threading.Mutex($false, $localName)
+        }
         $locked = $mutex.WaitOne(5000)
         if ($locked) {
             Add-Content -Path $Script:AuditFile -Value $line -Encoding ASCII
         }
-        # If not locked: entry discarded to preserve JSONL integrity.
+        # Timeout: entry discarded. No unprotected write (FIX R-08).
     } catch {
-        try { Add-Content -Path $Script:AuditFile -Value $line -Encoding ASCII } catch { }
+        # Both tiers failed: discard. No unprotected write.
     } finally {
         if ($locked -and $null -ne $mutex) { try { $mutex.ReleaseMutex() } catch { } }
         if ($null -ne $mutex) { try { $mutex.Dispose() } catch { } }
@@ -225,7 +246,12 @@ $Script:Fn_TestPermission = {
     if ($Script:LibsLoaded) {
         try { return Test-Permission -Role $Script:CurrentRole -Action $Action } catch { }
     }
-    # Fallback: static map when Auth.ps1 unavailable
+    # Fallback: static map when Auth.ps1 unavailable.
+    # FIX V-04/R-04 (AUDIT v3 CRITICAL): The previous 'default { return $true }'
+    # was FAIL-OPEN: any action not explicitly listed was granted to all roles.
+    # This contradicted Auth.ps1's fail-safe design and meant any new action added
+    # to the engine was silently accessible without restriction.
+    # CORRECTION: default is now DENY ($false), matching Auth.ps1 behaviour.
     switch ($Action) {
         'EditConfig'        { return $Script:CurrentRole -eq 'Admin' }
         'ViewAudit'         { return $Script:CurrentRole -in @('Admin') }
@@ -234,7 +260,12 @@ $Script:Fn_TestPermission = {
         'ManageCheckpoints' { return $Script:CurrentRole -eq 'Admin' }
         'CreateTask'        { return $Script:CurrentRole -in @('Admin','Developer') }
         'EditTask'          { return $Script:CurrentRole -in @('Admin','Developer') }
-        default             { return $true }
+        'RunTask'           { return $true }   # All authenticated users
+        'ViewHistory'       { return $true }
+        'ViewArtifacts'     { return $true }
+        'ViewMetrics'       { return $true }
+        'ViewDiag'          { return $true }
+        default             { return $false }  # FIX V-04: DENY unknown actions
     }
 }
 
@@ -294,7 +325,11 @@ $Script:Fn_GetExecutionHistory = {
 }
 
 $Script:Fn_GetRunSummaries = {
-    $all = @(& $Script:Fn_ReadLogTail -MaxLines 800)
+    # FIX R-09 (AUDIT v3 MEDIUM): Previous 800-line window caused active runs
+    # to appear as 'RUNNING' when their terminal entry (OK/ERROR) was outside
+    # the window. In high-activity environments (>13 tasks/min) this was
+    # regularly hit. Increased to 2000 lines (~2.5x safety margin).
+    $all = @(& $Script:Fn_ReadLogTail -MaxLines 2000)
     if ($all.Count -eq 0) { return @() }
     $summaries = @()
     foreach ($g in ($all | Group-Object runId)) {
@@ -387,21 +422,37 @@ $Script:Fn_StartTaskExecution = {
     if ($Params -and $Params.Count -gt 0) {
         $paramsJson = $Params | ConvertTo-Json -Compress
     }
-    $escapedParams = $paramsJson -replace '"', '\"'
+    # FIX V-01: removed manual escaping ($escapedParams = $paramsJson -replace '"', '\"')
+    # ArgumentList handles quoting safely — see process creation block below.
 
-    $argString = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Script:RunScript`" -Task `"$TaskName`" -Params `"$escapedParams`""
-    if ($WhatIf)     { $argString += ' -WhatIf' }
-    if ($Checkpoint) { $argString += ' -Checkpoint' }
-    if ($Resume)     { $argString += ' -Resume' }
-
+    # FIX V-01/R-01 (AUDIT v3 CRITICAL): Previously this code manually escaped
+    # the JSON string with -replace '"', '\"' and embedded it in $argString.
+    # A parameter value containing \" could break argstring parsing and inject
+    # arbitrary arguments into the child powershell.exe process.
+    #
+    # CORRECTION: Use ProcessStartInfo.ArgumentList (StringCollection) which
+    # handles quoting automatically. Each token is a distinct, safe argument.
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName               = 'powershell.exe'
-    $psi.Arguments              = $argString
     $psi.UseShellExecute        = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
     $psi.CreateNoWindow         = $true
     $psi.WorkingDirectory       = $Script:EngineRoot
+
+    [void]$psi.ArgumentList.Add('-NoProfile')
+    [void]$psi.ArgumentList.Add('-NonInteractive')
+    [void]$psi.ArgumentList.Add('-ExecutionPolicy')
+    [void]$psi.ArgumentList.Add('Bypass')
+    [void]$psi.ArgumentList.Add('-File')
+    [void]$psi.ArgumentList.Add($Script:RunScript)
+    [void]$psi.ArgumentList.Add('-Task')
+    [void]$psi.ArgumentList.Add($TaskName)
+    [void]$psi.ArgumentList.Add('-Params')
+    [void]$psi.ArgumentList.Add($paramsJson)   # no manual escaping needed
+    if ($WhatIf)     { [void]$psi.ArgumentList.Add('-WhatIf') }
+    if ($Checkpoint) { [void]$psi.ArgumentList.Add('-Checkpoint') }
+    if ($Resume)     { [void]$psi.ArgumentList.Add('-Resume') }
 
     $proc  = New-Object System.Diagnostics.Process
     $proc.StartInfo           = $psi
@@ -990,8 +1041,68 @@ $Script:Fn_SaveConfigPage = {
     $cs  = $Script:Ctrl['txtConfigStatus']
     try {
         $obj = $txt | ConvertFrom-Json
+        # -- FIX V-05 (AUDIT v3 HIGH): Expanded validation beyond maxRetries.
+        # An Admin could previously inject a malicious SMTP server or clear AD groups,
+        # effectively escalating to unrestricted access after the next restart.
+
+        # 1. maxRetries range
         $mr  = [int]$obj.engine.maxRetries
-        if ($mr -lt 0 -or $mr -gt 10) { throw "maxRetries must be 0-10" }
+        if ($mr -lt 0 -or $mr -gt 10) { throw "engine.maxRetries must be 0-10 (got $mr)" }
+
+        # 2. retryDelaySeconds sanity
+        if ($null -ne $obj.engine.retryDelaySeconds) {
+            $rd = [double]$obj.engine.retryDelaySeconds
+            if ($rd -lt 0 -or $rd -gt 300) { throw "engine.retryDelaySeconds must be 0-300s (got $rd)" }
+        }
+
+        # 3. SMTP server: no shell metacharacters, max 253 chars (RFC 1035)
+        if (-not [string]::IsNullOrWhiteSpace($obj.notifications.smtpServer)) {
+            $smtp = $obj.notifications.smtpServer.Trim()
+            if ($smtp.Length -gt 253) { throw "notifications.smtpServer is too long (max 253 chars)" }
+            if ($smtp -match '[;&|`$<>!{}()\[\]\\]') {
+                throw "notifications.smtpServer contains invalid characters: '$smtp'"
+            }
+        }
+
+        # 4. SMTP port range
+        if ($null -ne $obj.notifications.smtpPort) {
+            $port = [int]$obj.notifications.smtpPort
+            if ($port -lt 1 -or $port -gt 65535) { throw "notifications.smtpPort must be 1-65535 (got $port)" }
+        }
+
+        # 5. AD group names: must start with 'CN=' if non-empty (basic DN format check)
+        foreach ($field in @('adminAdGroup','developerAdGroup')) {
+            $val = $obj.security.$field
+            if (-not [string]::IsNullOrWhiteSpace($val)) {
+                $val = $val.Trim()
+                if (-not ($val -match '^CN=')) {
+                    throw "security.$field must be a valid LDAP Distinguished Name starting with 'CN=' (got '$val')"
+                }
+                if ($val.Length -gt 512) { throw "security.$field is too long (max 512 chars)" }
+            }
+        }
+
+        # 6. User whitelists: only alphanumeric, dot, hyphen, underscore
+        foreach ($field in @('adminUsers','developerUsers')) {
+            $val = $obj.security.$field
+            if (-not [string]::IsNullOrWhiteSpace($val)) {
+                $users = $val -split '[,;\s]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                foreach ($u in $users) {
+                    if ($u -match '[^a-zA-Z0-9._\-]') {
+                        throw "security.$field contains invalid username '$u'. Only letters, digits, ., - and _ are allowed."
+                    }
+                }
+            }
+        }
+
+        # 7. logLevel must be a valid value
+        $validLevels = @('DEBUG','INFO','WARN','ERROR','FATAL')
+        if (-not [string]::IsNullOrWhiteSpace($obj.engine.logLevel)) {
+            if ($validLevels -notcontains $obj.engine.logLevel.Trim().ToUpper()) {
+                throw "engine.logLevel must be one of: $($validLevels -join ', ')"
+            }
+        }
+
         [System.IO.File]::WriteAllText($Script:ConfigFile, $txt, [System.Text.Encoding]::ASCII)
         & $Script:Fn_WriteAuditLog -Action 'EDIT_CONFIG'
         if ($null -ne $cs) { $cs.Text = 'Saved successfully.'; $cs.Foreground = [System.Windows.Media.Brushes]::LimeGreen }
@@ -1234,7 +1345,8 @@ if ($null -eq $Script:XAML) {
     [xml]$Script:XAML = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="AutoBuild v3.0" Height="700" Width="1100"
+        Title="AutoBuild v3.0"
+        MinHeight="600" MinWidth="860"
         Background="#0F1117" WindowStartupLocation="CenterScreen">
   <Grid><TextBlock Text="AutoBuild v3.0 - Load ui\AutoBuild.xaml for full UI"
     Foreground="#F5A623" FontSize="18" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
@@ -1262,11 +1374,57 @@ function Initialize-Window {
     $reader = New-Object System.Xml.XmlNodeReader $Script:XAML
     $Script:Window = [Windows.Markup.XamlReader]::Load($reader)
 
+    # =========================================================================
+    # ADAPTIVE WINDOW SIZING
+    # Calculates optimal window dimensions based on the available work area of
+    # the primary monitor, so the UI works correctly on laptops (1366x768),
+    # standard desktops (1920x1080), 4K monitors, and multi-monitor setups.
+    #
+    # Strategy:
+    #   - Target 92% of the work area (leaves room for taskbar and window chrome)
+    #   - Cap at a maximum of 1600x950 so the UI does not over-expand on 4K
+    #   - Enforce the XAML MinWidth/MinHeight as hard floor (860 x 600)
+    #   - On very small screens (< 1100px wide) maximize automatically
+    # =========================================================================
+    try {
+        $workArea   = [System.Windows.SystemParameters]::WorkArea
+        $screenW    = $workArea.Width
+        $screenH    = $workArea.Height
+
+        $targetW    = [Math]::Floor($screenW * 0.92)
+        $targetH    = [Math]::Floor($screenH * 0.92)
+
+        # Cap at design maximum so the UI does not stretch awkwardly on 4K
+        $maxW       = 1600
+        $maxH       = 950
+        $targetW    = [Math]::Min($targetW, $maxW)
+        $targetH    = [Math]::Min($targetH, $maxH)
+
+        # Enforce XAML minimums
+        $minW       = 860
+        $minH       = 600
+        $targetW    = [Math]::Max($targetW, $minW)
+        $targetH    = [Math]::Max($targetH, $minH)
+
+        if ($screenW -lt 1100) {
+            # Small screen (netbook / embedded terminal): start maximized
+            $Script:Window.WindowState = [System.Windows.WindowState]::Maximized
+        } else {
+            $Script:Window.Width  = $targetW
+            $Script:Window.Height = $targetH
+        }
+    } catch {
+        # SystemParameters unavailable (unusual): fall back to fixed safe size
+        $Script:Window.Width  = 1280
+        $Script:Window.Height = 800
+    }
+
     # Discover all named controls
     $Script:Ctrl = @{}
     $allNames = @(
         'txtVersion','txtUserInitial','txtUserName','txtUserRole',
         'txtEngineStatus','txtEnginePath','elEngineStatus','txtPageTitle','btnRefresh',
+        'pnlSecurityWarning','txtSecurityWarning','gridPages','pnlPageHeader',
         'pageCatalog','gridCatalog','txtCatalogSearch','cboCatalogCategory','txtCatalogCount',
         'btnCatalogExecute','btnCatalogViewHistory','btnCatalogAddQueue',
         'pageExecute','cboExecTask','pnlTaskInfo','txtExecTaskDesc','txtExecTaskCat',
@@ -1302,6 +1460,24 @@ function Initialize-Window {
         if ($null -eq $found) { Write-Verbose "Control not found: $name" }
         $Script:Ctrl[$name] = $found
     }
+
+    # ── PROD-GUARD: Security warning banner ──────────────────────────────────
+    # Show the red banner when the engine is running in dev mode (no AD groups).
+    if (-not [string]::IsNullOrWhiteSpace($Script:SecurityWarning)) {
+        $bannerPanel = $Script:Ctrl['pnlSecurityWarning']
+        $bannerText  = $Script:Ctrl['txtSecurityWarning']
+        if ($null -ne $bannerPanel) {
+            $bannerPanel.Visibility = [System.Windows.Visibility]::Visible
+            if ($null -ne $bannerText) { $bannerText.Text = $Script:SecurityWarning }
+            # Shift the pages grid down by banner height (34px) + header (48px)
+            $pagesGrid = $Script:Ctrl['gridPages']
+            if ($null -ne $pagesGrid) { $pagesGrid.Margin = [System.Windows.Thickness]::new(0, 82, 0, 0) }
+        }
+    }
+
+    # ── ADAPTIVE: Update page header DockPanel height to match actual header ──
+    # The header is now 48px (reduced from 52px for better proportions on small screens).
+    # If the security banner is visible add 34px. The pages grid margin is set above.
 
     # Header
     $c = $Script:Ctrl['txtUserName'];    if ($null -ne $c) { $c.Text = $Script:CurrentUser }

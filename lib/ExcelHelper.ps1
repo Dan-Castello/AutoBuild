@@ -38,22 +38,50 @@ function New-ExcelApp {
     .SYNOPSIS
         Creates a silent Excel instance with COM availability pre-check.
         Returns $null if Excel is not available.
+    .NOTES
+        FIX R-05 (AUDIT v3): The previous implementation used
+        Get-Process -Name 'EXCEL' | Sort-Object StartTime | Last 1
+        to capture the PID. In multi-user environments this captured the
+        MOST RECENT Excel process in the system, not necessarily the one
+        created by this COM call, causing Remove-ZombieCom to kill another
+        operator's legitimate Excel instance.
+
+        New approach: record all existing EXCEL PIDs BEFORE creating the COM
+        object, then immediately after creation find the new PID by set difference.
+        This is deterministic regardless of how many Excel instances exist.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Context,
         [int]$TimeoutSec = 30
     )
 
+    # Snapshot existing Excel PIDs before creating COM object.
+    $beforePids = @(Get-Process -Name 'EXCEL' -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty Id)
+
     $xl = Invoke-ComWithTimeout -Context $Context -ProgId 'Excel.Application' `
           -TimeoutSec $TimeoutSec -Label 'Excel'
 
     if ($null -eq $xl) { return $null }
 
-    # Track this PID so Remove-ZombieCom does not kill it. (COM-03 fix)
-    try {
-        $xlPid = (Get-Process -Name 'EXCEL' | Sort-Object StartTime | Select-Object -Last 1).Id
-        if ($xlPid) { Register-EngineCom -Pid_ $xlPid }
-    } catch { }
+    # FIX R-05: Find the NEW Excel PID by set-difference from before-snapshot.
+    # Allow up to 500ms for the process to appear in the process list.
+    $xlPid = $null
+    $deadline = [datetime]::Now.AddMilliseconds(500)
+    while ($null -eq $xlPid -and [datetime]::Now -lt $deadline) {
+        $afterPids = @(Get-Process -Name 'EXCEL' -ErrorAction SilentlyContinue |
+                       Select-Object -ExpandProperty Id)
+        $newPids   = @($afterPids | Where-Object { $beforePids -notcontains $_ })
+        if ($newPids.Count -gt 0) { $xlPid = $newPids[0] }
+        else { Start-Sleep -Milliseconds 50 }
+    }
+
+    if ($null -ne $xlPid) {
+        Register-EngineCom -Pid_ $xlPid
+        Write-BuildLog $Context 'DEBUG' "Excel PID registered: $xlPid"
+    } else {
+        Write-BuildLog $Context 'WARN' "Could not determine Excel PID. Remove-ZombieCom protection unavailable for this instance."
+    }
 
     try {
         $xl.Visible        = $Context.Config.excel.visible

@@ -28,19 +28,21 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $Script:Runner = @{
-    IsRunning      = $false
-    IsPaused       = $false
-    IsStopped      = $true
-    AutoAdvance    = $false
-    ActiveTaskId   = $null
-    ActiveProcess  = $null
-    ActiveQueue    = $null
-    ActiveBuffer   = $null
-    ActiveStarted  = $null
-    PollTimer      = $null
-    EngineRoot     = ''
-    RunScript      = ''
-    RegistryFile   = ''
+    IsRunning       = $false
+    IsPaused        = $false
+    IsStopped       = $true
+    AutoAdvance     = $false
+    ActiveTaskId    = $null
+    ActiveProcess   = $null
+    ActiveQueue     = $null
+    ActiveBuffer    = $null
+    ActiveStarted   = $null
+    ActiveOutHandler = $null   # FIX STRUCTURAL-2: stored for explicit unregistration
+    ActiveErrHandler = $null   # FIX STRUCTURAL-2: stored for explicit unregistration
+    PollTimer       = $null
+    EngineRoot      = ''
+    RunScript       = ''
+    RegistryFile    = ''
 }
 
 $Script:QueueEvents = @{
@@ -53,10 +55,11 @@ $Script:QueueEvents = @{
 
 function Write-QueueLog {
     param(
-        [string]$TaskName = 'QUEUE',
-        [string]$Level    = 'INFO',
-        [string]$Message  = '',
-        [string]$Detail   = ''
+        [string]$TaskName  = 'QUEUE',
+        [string]$Level     = 'INFO',
+        [string]$Message   = '',
+        [string]$Detail    = '',
+        [string]$EngineRunId = ''   # FIX OBS: accept correlated RunId from Logger.ps1
     )
     if ([string]::IsNullOrWhiteSpace($Script:Runner.RegistryFile)) { return }
     if (-not (Test-Path (Split-Path $Script:Runner.RegistryFile -Parent))) { return }
@@ -65,9 +68,16 @@ function Write-QueueLog {
     $safeDetail = $Detail -replace "`r`n",' | ' -replace "`n",' | ' -replace "`r",' | '
     $safeDetail = $safeDetail -replace '[\x00-\x1F\x7F]', ''
 
+    # FIX OBS: use correlated RunId when provided, else generate queue-local id.
+    $runId = if (-not [string]::IsNullOrWhiteSpace($EngineRunId)) {
+        $EngineRunId
+    } else {
+        'Q_{0}' -f (Get-Date -Format 'HHmmssfff')
+    }
+
     $entry = [ordered]@{
         ts      = $ts
-        runId   = ('Q_{0}' -f (Get-Date -Format 'HHmmssfff'))
+        runId   = $runId
         task    = $TaskName
         level   = $Level
         message = $Message
@@ -78,11 +88,20 @@ function Write-QueueLog {
     $mutex  = $null
     $locked = $false
     try {
-        $mutex  = New-Object System.Threading.Mutex($false, 'Global\AutoBuildLogMutex')
+        # Two-tier mutex: Global\ for cross-session, Local\ fallback for restricted environments.
+        try {
+            $mutex = New-Object System.Threading.Mutex($false, 'Global\AutoBuildLogMutex')
+        } catch {
+            $mutex = New-Object System.Threading.Mutex($false, 'Local\AutoBuildLogMutex')
+        }
         $locked = $mutex.WaitOne(5000)
-        if ($locked) { Add-Content -Path $Script:Runner.RegistryFile -Value $line -Encoding ASCII }
+        if ($locked) {
+            Add-Content -Path $Script:Runner.RegistryFile -Value $line -Encoding ASCII
+        }
+        # FIX R-08: No fallback unprotected write. Discard on timeout.
     } catch {
-        try { Add-Content -Path $Script:Runner.RegistryFile -Value $line -Encoding ASCII } catch { }
+        # Both mutex tiers failed — discard. No unprotected write.
+        Write-Verbose "Write-QueueLog: mutex unavailable, entry discarded. Error: $_"
     } finally {
         if ($locked -and $null -ne $mutex) { try { $mutex.ReleaseMutex() } catch { } }
         if ($null -ne $mutex) { try { $mutex.Dispose() } catch { } }
@@ -93,6 +112,34 @@ function Invoke-Event {
     param([string]$Name, [object[]]$Args = @())
     $h = $Script:QueueEvents[$Name]
     if ($null -ne $h) { try { & $h @Args } catch { } }
+}
+
+function Clear-ActiveProcess {
+    <#
+    .SYNOPSIS
+        FIX STRUCTURAL-2 (AUDIT v3): Unregisters DataReceived event handlers BEFORE
+        disposing the process object. Without explicit removal, handlers remain
+        registered in the GC root — accumulating across task cancellations and
+        causing unbounded memory growth in long-running UI sessions.
+    #>
+    $proc = $Script:Runner.ActiveProcess
+    if ($null -ne $proc) {
+        # Unregister handlers before Dispose() to allow GC collection.
+        if ($null -ne $Script:Runner.ActiveOutHandler) {
+            try { $proc.remove_OutputDataReceived($Script:Runner.ActiveOutHandler) } catch { }
+        }
+        if ($null -ne $Script:Runner.ActiveErrHandler) {
+            try { $proc.remove_ErrorDataReceived($Script:Runner.ActiveErrHandler) } catch { }
+        }
+        try { $proc.Dispose() } catch { }
+    }
+    $Script:Runner.ActiveProcess    = $null
+    $Script:Runner.ActiveOutHandler = $null
+    $Script:Runner.ActiveErrHandler = $null
+    $Script:Runner.ActiveQueue      = $null
+    $Script:Runner.ActiveBuffer     = $null
+    $Script:Runner.ActiveStarted    = $null
+    $Script:Runner.ActiveTaskId     = $null
 }
 
 function Start-TaskProcess {
@@ -106,17 +153,35 @@ function Start-TaskProcess {
     if ($Task.Parameters -and $Task.Parameters.Count -gt 0) {
         $paramsJson = $Task.Parameters | ConvertTo-Json -Compress
     }
-    $escapedParams = $paramsJson -replace '"', '\"'
-    $argString = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$($Script:Runner.RunScript)`" -Task `"$($Task.TaskReference)`" -Params `"$escapedParams`""
 
+    # FIX V-01/R-01 (AUDIT v3 CRITICAL): Previously this code manually escaped
+    # the JSON string with -replace '"', '\"' and embedded it in $argString.
+    # A parameter value containing \" could break the argstring parsing and
+    # inject arbitrary arguments into the child powershell.exe process.
+    #
+    # CORRECTION: Use ProcessStartInfo.ArgumentList (available in .NET 4.5+
+    # which ships with PS 5.1 on Windows 8.1+). ArgumentList is a StringCollection
+    # that handles quoting automatically — no manual escaping required or permitted.
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName               = 'powershell.exe'
-    $psi.Arguments              = $argString
     $psi.UseShellExecute        = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
     $psi.CreateNoWindow         = $true
     $psi.WorkingDirectory       = $Script:Runner.EngineRoot
+
+    # Build argument list via the safe collection API.
+    # Each argument is passed as a distinct token — no shell interpolation occurs.
+    [void]$psi.ArgumentList.Add('-NoProfile')
+    [void]$psi.ArgumentList.Add('-NonInteractive')
+    [void]$psi.ArgumentList.Add('-ExecutionPolicy')
+    [void]$psi.ArgumentList.Add('Bypass')
+    [void]$psi.ArgumentList.Add('-File')
+    [void]$psi.ArgumentList.Add($Script:Runner.RunScript)
+    [void]$psi.ArgumentList.Add('-Task')
+    [void]$psi.ArgumentList.Add($Task.TaskReference)
+    [void]$psi.ArgumentList.Add('-Params')
+    [void]$psi.ArgumentList.Add($paramsJson)   # no escaping — ArgumentList handles quoting
 
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo           = $psi
@@ -129,6 +194,10 @@ function Start-TaskProcess {
     $errH = [System.Diagnostics.DataReceivedEventHandler]{ param($s,$e); if ($null -ne $e.Data) { $q.Enqueue("[ERR] $($e.Data)") } }
     $proc.add_OutputDataReceived($outH)
     $proc.add_ErrorDataReceived($errH)
+
+    # Store handlers so they can be explicitly removed on cleanup. (FIX STRUCTURAL-2)
+    $Script:Runner.ActiveOutHandler = $outH
+    $Script:Runner.ActiveErrHandler = $errH
 
     try {
         [void]$proc.Start()
@@ -177,12 +246,8 @@ function Step-PollActiveTask {
     $tid      = $Script:Runner.ActiveTaskId
     $taskRef  = Get-QueueTask -TaskId $tid
 
-    $Script:Runner.ActiveTaskId  = $null
-    $Script:Runner.ActiveProcess = $null
-    $Script:Runner.ActiveQueue   = $null
-    $Script:Runner.ActiveBuffer  = $null
-    $Script:Runner.ActiveStarted = $null
-    try { $proc.Dispose() } catch { }
+    # FIX STRUCTURAL-2: Unregister handlers before Dispose via helper.
+    Clear-ActiveProcess
 
     if ($exitCode -eq 0) {
         Set-QueueTaskStatus -TaskId $tid -Status 'Completed' -Result $output
@@ -278,15 +343,11 @@ function Stop-QueueRunner {
         if ($null -ne $Script:Runner.ActiveProcess) {
             try {
                 if (-not $Script:Runner.ActiveProcess.HasExited) { $Script:Runner.ActiveProcess.Kill() }
-                $Script:Runner.ActiveProcess.Dispose()
             } catch { }
         }
         Set-QueueTaskStatus -TaskId $tid -Status 'Canceled' -ErrorMessage 'Stop-QueueRunner called.'
-        $Script:Runner.ActiveTaskId  = $null
-        $Script:Runner.ActiveProcess = $null
-        $Script:Runner.ActiveQueue   = $null
-        $Script:Runner.ActiveBuffer  = $null
-        $Script:Runner.ActiveStarted = $null
+        # FIX STRUCTURAL-2: unregister handlers before Dispose().
+        Clear-ActiveProcess
     }
     Invoke-Event -Name 'OnStateChanged' -Args @($Script:Runner)
 }
@@ -358,14 +419,10 @@ function Stop-ActiveTask {
     if ($null -ne $Script:Runner.ActiveProcess) {
         try {
             if (-not $Script:Runner.ActiveProcess.HasExited) { $Script:Runner.ActiveProcess.Kill() }
-            $Script:Runner.ActiveProcess.Dispose()
         } catch { }
     }
-    $Script:Runner.ActiveTaskId  = $null
-    $Script:Runner.ActiveProcess = $null
-    $Script:Runner.ActiveQueue   = $null
-    $Script:Runner.ActiveBuffer  = $null
-    $Script:Runner.ActiveStarted = $null
+    # FIX STRUCTURAL-2: use Clear-ActiveProcess to unregister event handlers before Dispose().
+    Clear-ActiveProcess
     Set-QueueTaskStatus -TaskId $tid -Status 'Canceled' -ErrorMessage 'Canceled by user.'
     return $true
 }

@@ -33,13 +33,25 @@ if ([string]::IsNullOrWhiteSpace($Author)) {
 }
 
 $content = Get-Content $Template -Raw -Encoding ASCII
-$content = $content `
-    -replace '@Description : Brief task description',                         "@Description : $Description" `
-    -replace '@Category    : SAP \| Excel \| CSV \| Report \| Utility',       "@Category    : $Category" `
-    -replace '@Author      : Your Name',                                       "@Author      : $Author" `
-    -replace '# Synopsis: Brief description shown in .\\Run.ps1 -List',       "# Synopsis: $Description" `
-    -replace 'task NOMBRE \{',                                                 "task $Name {" `
-    -replace "-TaskName 'NOMBRE'",                                             "-TaskName '$Name'"
+
+# FIX V-06 (AUDIT v3 LOW-MED): The previous code used PowerShell's -replace operator
+# (regex-based) to substitute template placeholders. If $Description, $Author, or $Name
+# contained regex metacharacters (parentheses, asterisks, backslashes, etc.) the replacement
+# could fail silently or produce corrupted code in the generated .ps1 file.
+# CORRECTION: Use [string]::Replace() which performs literal string replacement,
+# immune to regex special characters in the substitution values.
+$content = $content.Replace('@Description : Brief task description',
+                            "@Description : $Description")
+$content = $content.Replace('@Category    : SAP | Excel | CSV | Report | Utility',
+                            "@Category    : $Category")
+$content = $content.Replace('@Author      : Your Name',
+                            "@Author      : $Author")
+$content = $content.Replace('# Synopsis: Brief description shown in .\Run.ps1 -List',
+                            "# Synopsis: $Description")
+$content = $content.Replace('task NOMBRE {',
+                            "task $Name {")
+$content = $content.Replace("-TaskName 'NOMBRE'",
+                            "-TaskName '$Name'")
 
 [System.IO.File]::WriteAllText($Output, $content, [System.Text.Encoding]::ASCII)
 

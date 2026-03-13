@@ -32,7 +32,18 @@
 # =============================================================================
 Set-StrictMode -Version Latest
 
-$Script:LogMutexName = 'Global\AutoBuildLogMutex'
+$Script:LogMutexName  = 'Global\AutoBuildLogMutex'
+# FIX R-08: Tracks entries discarded due to mutex unavailability.
+# Exposed via Get-LogDroppedCount for health monitoring.
+$Script:LogDroppedCount = 0
+
+function Get-LogDroppedCount {
+    <#
+    .SYNOPSIS Returns the count of log entries discarded due to mutex contention or failure. #>
+    return $Script:LogDroppedCount
+}
+
+function Reset-LogDroppedCount { $Script:LogDroppedCount = 0 }
 
 # ---------------------------------------------------------------------------
 # RUN IDENTIFIER
@@ -174,6 +185,21 @@ function Write-LogLine {
         is SKIPPED. We never write without the mutex held.
         Rationale: corrupted JSONL is worse than a missing log entry.
         This is an intentional design decision.
+
+        FIX R-08 (AUDIT v3): The previous catch-fallback wrote WITHOUT any mutex
+        when the Global\ constructor failed — the exact race condition the mutex
+        was designed to prevent.
+
+        CORRECTION: Two-tier mutex strategy:
+          Tier 1: 'Global\AutoBuildLogMutex'  — cross-session serialization
+                  (required for multi-user concurrent builds)
+          Tier 2: 'Local\AutoBuildLogMutex'   — same-session fallback
+                  (used when Group Policy restricts Global\ named mutexes,
+                   e.g. in restricted Pester test environments)
+
+        The write is ALWAYS under a mutex (Tier 1 or Tier 2).
+        The entry is ONLY discarded if both mutex tiers fail AND WaitOne times out.
+        An unprotected write is never performed.
     #>
     param(
         [Parameter(Mandatory)][string]$FilePath,
@@ -189,15 +215,30 @@ function Write-LogLine {
     $mutex  = $null
     $locked = $false
     try {
-        $mutex  = New-Object System.Threading.Mutex($false, $Script:LogMutexName)
+        # Tier 1: Global\ mutex for cross-session serialization.
+        try {
+            $mutex = New-Object System.Threading.Mutex($false, $Script:LogMutexName)
+        } catch {
+            # Global\ mutex restricted (e.g. Group Policy, restricted test runner).
+            # FIX R-08: fall back to Local\ — still serialized within the session.
+            $localName = $Script:LogMutexName -replace '^Global\\', 'Local\'
+            $mutex = New-Object System.Threading.Mutex($false, $localName)
+            Write-Verbose "Write-LogLine: Global mutex unavailable, using Local mutex. Error: $_"
+        }
+
         $locked = $mutex.WaitOne(5000)
         if ($locked) {
             Add-Content -Path $FilePath -Value $Line -Encoding ASCII
+        } else {
+            # WaitOne timed out — entry discarded to preserve JSONL integrity.
+            # Never write without the mutex held.
+            $Script:LogDroppedCount++
+            Write-Verbose "Write-LogLine: mutex timeout, entry discarded."
         }
-        # If not locked: entry discarded to preserve JSONL integrity.
     } catch {
-        # Best-effort last resort: attempt once without mutex.
-        try { Add-Content -Path $FilePath -Value $Line -Encoding ASCII } catch { }
+        # Both mutex tiers failed — discard and track. No unprotected write.
+        $Script:LogDroppedCount++
+        Write-Verbose "Write-LogLine: mutex unavailable (both tiers), entry discarded. Error: $_"
     } finally {
         if ($locked -and $null -ne $mutex) {
             try { $mutex.ReleaseMutex() } catch { }
